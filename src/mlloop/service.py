@@ -1,0 +1,994 @@
+"""Core operations behind the MCP tools.
+
+Every workflow rule (the "gates") lives here so it is enforced at the tool
+layer rather than requested via prompts. A refused operation raises
+GateError with a message that tells the agent what to do instead.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+from .artifacts import fingerprint_dataset, validate_run_artifacts
+from .ledger import Ledger, utcnow
+
+
+class GateError(Exception):
+    """A workflow gate refused the operation."""
+
+
+TASK_TYPES = ("classification", "regression")
+DIRECTIONS = ("maximize", "minimize")
+RESOLUTIONS = ("confirmed", "refuted", "inconclusive")
+RUN_KINDS = ("baseline", "experiment", "forensics")
+DEFAULT_POLICY = {"max_runs": 30}
+
+ARTIFACT_CONTRACT = {
+    "predictions.parquet": (
+        "required — held-out predictions: columns row_id (0-based row index into the "
+        "goal dataset), y_true, y_pred, plus proba_<class> columns for classification"
+    ),
+    "meta.json": (
+        "required — keys: model_desc (str), hyperparams (dict), features (list), "
+        "seed (int); recommended: train_seconds"
+    ),
+    "cv_predictions.parquet": (
+        "recommended — out-of-fold predictions, same columns; enables label-noise "
+        "and learning-curve diagnostics in Phase 1"
+    ),
+    "model.pkl": "optional — the fitted model",
+}
+
+COMPARISON_NOTE = (
+    "Raw deltas — seed-variance significance testing arrives with diagnose_run "
+    "(Phase 1); treat small deltas as noise, not progress."
+)
+
+
+def _improved(delta: float, direction: str) -> bool:
+    return delta > 0 if direction == "maximize" else delta < 0
+
+
+class LedgerService:
+    def __init__(self, workspace: Path | str):
+        self.ledger = Ledger(workspace)
+
+    # ------------------------------------------------------------------
+    # internal helpers
+    # ------------------------------------------------------------------
+
+    def _goal(self, con: sqlite3.Connection):
+        return con.execute("SELECT * FROM goal WHERE id = 1").fetchone()
+
+    def _require_goal(self, con: sqlite3.Connection):
+        goal = self._goal(con)
+        if goal is None:
+            raise GateError(
+                "No goal defined yet. Call goal_define first — it locks the dataset, "
+                "target column and primary metric for the whole project."
+            )
+        return goal
+
+    def _get_run(self, con: sqlite3.Connection, run_id: str):
+        return con.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+
+    def _running_run(self, con: sqlite3.Connection):
+        return con.execute("SELECT * FROM runs WHERE status = 'running' LIMIT 1").fetchone()
+
+    def _baseline_done(self, con: sqlite3.Connection) -> bool:
+        row = con.execute(
+            "SELECT 1 FROM runs WHERE kind = 'baseline' AND status = 'finished' LIMIT 1"
+        ).fetchone()
+        return row is not None
+
+    def _diagnosed(self, con: sqlite3.Connection, run_id: str) -> bool:
+        return con.execute("SELECT 1 FROM diagnoses WHERE run_id = ?", (run_id,)).fetchone() is not None
+
+    def _diagnosis_pending(self, con: sqlite3.Connection) -> str | None:
+        """Id of the latest finished baseline/experiment run lacking a diagnosis, if any."""
+        last = con.execute(
+            "SELECT id FROM runs WHERE status = 'finished' "
+            "AND kind IN ('baseline', 'experiment') ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        if last is not None and not self._diagnosed(con, last["id"]):
+            return last["id"]
+        return None
+
+    def _primary_value(self, goal, metrics_json: str | None) -> float | None:
+        if not metrics_json:
+            return None
+        value = json.loads(metrics_json).get(goal["primary_metric"])
+        return None if value is None else float(value)
+
+    def _best_run(self, con: sqlite3.Connection, goal) -> tuple[str, float] | None:
+        best: tuple[str, float] | None = None
+        rows = con.execute("SELECT id, metrics FROM runs WHERE status = 'finished' ORDER BY rowid")
+        for row in rows.fetchall():
+            value = self._primary_value(goal, row["metrics"])
+            if value is None:
+                continue
+            if best is None or _improved(value - best[1], goal["metric_direction"]):
+                best = (row["id"], value)
+        return best
+
+    def _goal_summary(self, goal) -> dict:
+        fp = json.loads(goal["dataset_fingerprint"])
+        return {
+            "task_type": goal["task_type"],
+            "dataset_path": goal["dataset_path"],
+            "dataset_rows": fp.get("rows"),
+            "dataset_sha256": (fp.get("sha256") or "")[:12],
+            "target_column": goal["target_column"],
+            "primary_metric": goal["primary_metric"],
+            "metric_direction": goal["metric_direction"],
+            "target_value": goal["target_value"],
+            "monitor_metrics": json.loads(goal["monitor_metrics"]),
+            "constraints": json.loads(goal["constraints"]),
+            "policy": json.loads(goal["policy"]),
+        }
+
+    def _run_summary(self, goal, row) -> dict:
+        return {
+            "id": row["id"],
+            "kind": row["kind"],
+            "status": row["status"],
+            "intent": row["intent"],
+            "hypothesis_id": row["hypothesis_id"],
+            "parent_run_id": row["parent_run_id"],
+            goal["primary_metric"]: self._primary_value(goal, row["metrics"]),
+            "created_at": row["created_at"],
+            "finished_at": row["finished_at"],
+        }
+
+    def _hypothesis_dict(self, row) -> dict:
+        return {
+            "id": row["id"],
+            "status": row["status"],
+            "statement": row["statement"],
+            "rationale": row["rationale"],
+            "prediction": row["prediction"],
+            "test_plan": row["test_plan"],
+            "created_at": row["created_at"],
+            "resolved_at": row["resolved_at"],
+            "resolution_narrative": row["resolution_narrative"],
+            "evidence_run_ids": json.loads(row["evidence_run_ids"]) if row["evidence_run_ids"] else None,
+        }
+
+    def _decision_dict(self, row) -> dict:
+        return {
+            "id": row["id"],
+            "created_at": row["created_at"],
+            "summary": row["summary"],
+            "evidence": json.loads(row["evidence"]) if row["evidence"] else None,
+            "next_action": row["next_action"],
+        }
+
+    # ------------------------------------------------------------------
+    # goal
+    # ------------------------------------------------------------------
+
+    def goal_define(
+        self,
+        *,
+        task_type: str,
+        dataset_path: str,
+        target_column: str,
+        primary_metric: str,
+        metric_direction: str,
+        target_value: float | None = None,
+        monitor_metrics: list[str] | None = None,
+        constraints: dict | None = None,
+        policy: dict | None = None,
+    ) -> dict:
+        if task_type not in TASK_TYPES:
+            raise GateError(f"task_type must be one of {TASK_TYPES}, got '{task_type}'.")
+        if metric_direction not in DIRECTIONS:
+            raise GateError(f"metric_direction must be one of {DIRECTIONS}, got '{metric_direction}'.")
+        if not (primary_metric or "").strip():
+            raise GateError("primary_metric is required (e.g. 'auc', 'rmse').")
+
+        with self.ledger.connect() as con:
+            if self._goal(con) is not None:
+                raise GateError(
+                    "A goal is already defined and locked. The primary metric and dataset "
+                    "cannot be silently swapped mid-project; if the goal is genuinely wrong, "
+                    "record a decision_record explaining why and start a fresh workspace."
+                )
+            try:
+                fingerprint = fingerprint_dataset(dataset_path)
+            except (FileNotFoundError, ValueError) as exc:
+                raise GateError(str(exc)) from exc
+            if target_column not in fingerprint["columns"]:
+                raise GateError(
+                    f"target_column '{target_column}' not found in dataset. "
+                    f"Available columns: {sorted(fingerprint['columns'])}."
+                )
+            merged_policy = {**DEFAULT_POLICY, **(policy or {})}
+            con.execute(
+                """
+                INSERT INTO goal (
+                    id, created_at, task_type, dataset_path, dataset_fingerprint,
+                    target_column, primary_metric, metric_direction, target_value,
+                    monitor_metrics, constraints, policy
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    utcnow(),
+                    task_type,
+                    str(Path(dataset_path).resolve()),
+                    json.dumps(fingerprint),
+                    target_column,
+                    primary_metric.strip(),
+                    metric_direction,
+                    target_value,
+                    json.dumps(monitor_metrics or []),
+                    json.dumps(constraints or {}),
+                    json.dumps(merged_policy),
+                ),
+            )
+            self.ledger.emit(
+                con,
+                "goal_defined",
+                {
+                    "task_type": task_type,
+                    "primary_metric": primary_metric.strip(),
+                    "metric_direction": metric_direction,
+                    "dataset_sha256": fingerprint["sha256"],
+                    "dataset_rows": fingerprint["rows"],
+                },
+            )
+            goal = self._goal(con)
+            summary = self._goal_summary(goal)
+        return {
+            "ok": True,
+            "goal": summary,
+            "next": (
+                "Start with the simplest reasonable baseline: run_start(kind='baseline', "
+                "intent='...'). Every run after the baseline requires a registered hypothesis."
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # hypotheses
+    # ------------------------------------------------------------------
+
+    def hypothesis_register(
+        self, *, statement: str, rationale: str, prediction: str, test_plan: str
+    ) -> dict:
+        fields = {
+            "statement": statement,
+            "rationale": rationale,
+            "prediction": prediction,
+            "test_plan": test_plan,
+        }
+        for name, value in fields.items():
+            if not (value or "").strip():
+                raise GateError(
+                    f"'{name}' is required. A hypothesis needs: a claim (statement), why you "
+                    "believe it given the evidence so far (rationale), a falsifiable prediction "
+                    "(what a discriminating experiment should observe if the claim is true), "
+                    "and how you will test it (test_plan)."
+                )
+        fields = {name: value.strip() for name, value in fields.items()}
+        with self.ledger.connect() as con:
+            self._require_goal(con)
+            hypothesis_id = self.ledger.next_id(con, "hypotheses", "H")
+            con.execute(
+                """
+                INSERT INTO hypotheses (id, created_at, statement, rationale, prediction, test_plan)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    hypothesis_id,
+                    utcnow(),
+                    fields["statement"],
+                    fields["rationale"],
+                    fields["prediction"],
+                    fields["test_plan"],
+                ),
+            )
+            self.ledger.emit(
+                con, "hypothesis_registered", {"id": hypothesis_id, "statement": fields["statement"]}
+            )
+        return {
+            "ok": True,
+            "hypothesis": {"id": hypothesis_id, "status": "open", **fields},
+            "next": (
+                "Design the cheapest experiment that can falsify it, then "
+                f"run_start(hypothesis_id='{hypothesis_id}', intent='...')."
+            ),
+        }
+
+    def hypothesis_resolve(
+        self,
+        *,
+        hypothesis_id: str,
+        resolution: str,
+        evidence_run_ids: list[str],
+        narrative: str,
+    ) -> dict:
+        if resolution not in RESOLUTIONS:
+            raise GateError(f"resolution must be one of {RESOLUTIONS}, got '{resolution}'.")
+        if not (narrative or "").strip():
+            raise GateError(
+                "narrative is required: state the evidence and the reasoning in one or two sentences."
+            )
+        if not evidence_run_ids:
+            raise GateError(
+                "evidence_run_ids is required: a hypothesis is resolved by experiments, not by opinion."
+            )
+        with self.ledger.connect() as con:
+            self._require_goal(con)
+            hyp = con.execute(
+                "SELECT * FROM hypotheses WHERE id = ?", (hypothesis_id,)
+            ).fetchone()
+            if hyp is None:
+                raise GateError(
+                    f"Unknown hypothesis '{hypothesis_id}'. See ledger_query(view='hypotheses')."
+                )
+            if hyp["status"] not in ("open", "testing"):
+                raise GateError(
+                    f"Hypothesis {hypothesis_id} is already resolved ({hyp['status']})."
+                )
+            linked = False
+            for run_id in evidence_run_ids:
+                run = self._get_run(con, run_id)
+                if run is None:
+                    raise GateError(f"Evidence run '{run_id}' does not exist.")
+                if run["status"] != "finished":
+                    raise GateError(
+                        f"Evidence run '{run_id}' is {run['status']} — only finished runs count as evidence."
+                    )
+                if run["hypothesis_id"] == hypothesis_id:
+                    linked = True
+            if not linked:
+                raise GateError(
+                    f"None of the evidence runs tested {hypothesis_id} (no run was started with "
+                    "this hypothesis_id). Run the discriminating experiment before resolving."
+                )
+            con.execute(
+                """
+                UPDATE hypotheses
+                SET status = ?, resolved_at = ?, resolution_narrative = ?, evidence_run_ids = ?
+                WHERE id = ?
+                """,
+                (resolution, utcnow(), narrative.strip(), json.dumps(evidence_run_ids), hypothesis_id),
+            )
+            self.ledger.emit(
+                con,
+                "hypothesis_resolved",
+                {"id": hypothesis_id, "resolution": resolution, "evidence_run_ids": evidence_run_ids},
+            )
+        return {
+            "ok": True,
+            "hypothesis_id": hypothesis_id,
+            "resolution": resolution,
+            "next": (
+                "Record what this changes about the plan with decision_record, then register "
+                "the next hypothesis or stop if the goal is met."
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # runs
+    # ------------------------------------------------------------------
+
+    def run_start(
+        self,
+        *,
+        intent: str,
+        kind: str = "experiment",
+        hypothesis_id: str | None = None,
+        parent_run_id: str | None = None,
+    ) -> dict:
+        if kind not in RUN_KINDS:
+            raise GateError(f"kind must be one of {RUN_KINDS}, got '{kind}'.")
+        if not (intent or "").strip():
+            raise GateError("intent is required: one sentence on what this run changes and why.")
+
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+            running = self._running_run(con)
+            if running is not None:
+                raise GateError(
+                    f"Run {running['id']} is still running. Finish it (run_finish) or abandon it "
+                    "(run_abandon) first — one run at a time keeps the ledger causal."
+                )
+            policy = json.loads(goal["policy"])
+            max_runs = int(policy.get("max_runs", DEFAULT_POLICY["max_runs"]))
+            started = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            if started >= max_runs:
+                raise GateError(
+                    f"Run budget exhausted ({started}/{max_runs} runs started). Record a "
+                    "decision_record summarizing where things stand; the user can raise the "
+                    "budget in a new goal if warranted."
+                )
+
+            baseline_done = self._baseline_done(con)
+            if not baseline_done and kind != "baseline":
+                raise GateError(
+                    "The first finished run must be a simple baseline — it anchors every later "
+                    "comparison. Call run_start(kind='baseline', intent='...') with a "
+                    "majority-class / linear / shallow-tree model."
+                )
+            if baseline_done and kind == "baseline":
+                raise GateError(
+                    "A finished baseline already exists. Re-running baselines with variations is "
+                    "an experiment and needs a hypothesis (e.g. about run-to-run variance)."
+                )
+
+            if kind == "baseline":
+                if hypothesis_id:
+                    raise GateError(
+                        "Baseline runs must not reference a hypothesis — the baseline is the "
+                        "evidence everything else is measured against."
+                    )
+            elif kind == "experiment":
+                if policy.get("enforce_diagnosis", True):
+                    last = con.execute(
+                        "SELECT id FROM runs WHERE status = 'finished' "
+                        "AND kind IN ('baseline', 'experiment') ORDER BY rowid DESC LIMIT 1"
+                    ).fetchone()
+                    if last is not None and not self._diagnosed(con, last["id"]):
+                        raise GateError(
+                            f"Run {last['id']} has not been diagnosed yet. Call "
+                            f"diagnose_run(run_id='{last['id']}') and study the failure modes "
+                            "before the next experiment — hypotheses come from diagnoses, not hunches."
+                        )
+                if not hypothesis_id:
+                    raise GateError(
+                        "Refused: every experiment must test a registered hypothesis. Study the "
+                        "previous results (ledger_query), form a falsifiable hypothesis about WHY "
+                        "performance is limited, register it with hypothesis_register, then retry "
+                        "run_start with hypothesis_id."
+                    )
+                hyp = con.execute(
+                    "SELECT * FROM hypotheses WHERE id = ?", (hypothesis_id,)
+                ).fetchone()
+                if hyp is None:
+                    raise GateError(
+                        f"Unknown hypothesis '{hypothesis_id}'. See ledger_query(view='hypotheses')."
+                    )
+                if hyp["status"] not in ("open", "testing"):
+                    raise GateError(
+                        f"Hypothesis {hypothesis_id} is already resolved ({hyp['status']}). "
+                        "Register a new hypothesis for this experiment."
+                    )
+            # kind == 'forensics': no hypothesis required — it interrogates the data itself.
+
+            if parent_run_id is not None:
+                parent = self._get_run(con, parent_run_id)
+                if parent is None:
+                    raise GateError(f"Unknown parent_run_id '{parent_run_id}'.")
+                if parent["status"] != "finished":
+                    raise GateError(f"Parent run {parent_run_id} is not finished.")
+            else:
+                row = con.execute(
+                    "SELECT id FROM runs WHERE status = 'finished' ORDER BY rowid DESC LIMIT 1"
+                ).fetchone()
+                parent_run_id = row["id"] if row else None
+
+            run_id = self.ledger.next_id(con, "runs", "R")
+            artifact_dir = self.ledger.runs_dir / run_id
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            con.execute(
+                """
+                INSERT INTO runs (id, created_at, parent_run_id, hypothesis_id, kind, intent, artifact_dir)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, utcnow(), parent_run_id, hypothesis_id, kind, intent.strip(), str(artifact_dir)),
+            )
+            if kind == "experiment":
+                con.execute(
+                    "UPDATE hypotheses SET status = 'testing' WHERE id = ? AND status = 'open'",
+                    (hypothesis_id,),
+                )
+            self.ledger.emit(
+                con,
+                "run_started",
+                {"run_id": run_id, "run_kind": kind, "hypothesis_id": hypothesis_id, "intent": intent.strip()},
+            )
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "kind": kind,
+            "hypothesis_id": hypothesis_id,
+            "parent_run_id": parent_run_id,
+            "artifact_dir": str(artifact_dir),
+            "artifact_contract": ARTIFACT_CONTRACT,
+            "next": "Train, write the artifacts into artifact_dir, then call run_finish with the metrics.",
+        }
+
+    def run_finish(self, *, run_id: str, metrics: dict, notes: str | None = None) -> dict:
+        if not isinstance(metrics, dict) or not metrics:
+            raise GateError("metrics must be a non-empty mapping of metric name to value.")
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+            run = self._get_run(con, run_id)
+            if run is None:
+                raise GateError(f"Unknown run_id '{run_id}'.")
+            if run["status"] != "running":
+                raise GateError(f"Run {run_id} is already {run['status']}.")
+
+            report = validate_run_artifacts(run["artifact_dir"], goal["task_type"])
+            if not report["valid"]:
+                self.ledger.emit(con, "run_finish_rejected", {"run_id": run_id, "errors": report["errors"]})
+                return {
+                    "ok": False,
+                    "run_id": run_id,
+                    "error": (
+                        "Artifact contract not satisfied; the run stays open. Write the "
+                        "missing/fixed artifacts into artifact_dir and call run_finish again."
+                    ),
+                    "artifact_dir": run["artifact_dir"],
+                    "artifact_errors": report["errors"],
+                    "artifact_warnings": report["warnings"],
+                    "artifact_contract": ARTIFACT_CONTRACT,
+                }
+
+            primary_metric = goal["primary_metric"]
+            if primary_metric not in metrics:
+                raise GateError(
+                    f"metrics must include the locked primary metric '{primary_metric}' "
+                    f"(got: {sorted(metrics)}). The primary metric cannot be swapped mid-project."
+                )
+            try:
+                value = float(metrics[primary_metric])
+            except (TypeError, ValueError) as exc:
+                raise GateError(
+                    f"primary metric '{primary_metric}' must be numeric, got {metrics[primary_metric]!r}."
+                ) from exc
+
+            comparison = self._comparison(con, goal, run, value)
+            con.execute(
+                """
+                UPDATE runs
+                SET status = 'finished', finished_at = ?, metrics = ?, meta = ?,
+                    artifact_report = ?, notes = ?
+                WHERE id = ?
+                """,
+                (
+                    utcnow(),
+                    json.dumps(metrics),
+                    json.dumps(report["meta"]),
+                    json.dumps(
+                        {
+                            "warnings": report["warnings"],
+                            "num_prediction_rows": report["num_prediction_rows"],
+                        }
+                    ),
+                    notes,
+                    run_id,
+                ),
+            )
+            self.ledger.emit(con, "run_finished", {"run_id": run_id, primary_metric: value})
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "primary_metric": {"name": primary_metric, "value": value},
+            "comparison": comparison,
+            "artifact_warnings": report["warnings"],
+            "next": (
+                "Interpret the result against the hypothesis's prediction. Resolve it when the "
+                "evidence suffices (hypothesis_resolve), or run another discriminating experiment. "
+                "Record the iteration's conclusion with decision_record."
+            ),
+        }
+
+    def _comparison(self, con: sqlite3.Connection, goal, run, value: float) -> dict:
+        direction = goal["metric_direction"]
+        out: dict = {"direction": direction, "vs_parent": None, "vs_best": None, "note": COMPARISON_NOTE}
+        if run["parent_run_id"]:
+            parent = self._get_run(con, run["parent_run_id"])
+            parent_value = self._primary_value(goal, parent["metrics"]) if parent else None
+            if parent_value is not None:
+                delta = value - parent_value
+                out["vs_parent"] = {
+                    "run_id": run["parent_run_id"],
+                    "value": parent_value,
+                    "delta": delta,
+                    "improved": _improved(delta, direction),
+                }
+        best = self._best_run(con, goal)
+        if best is not None:
+            delta = value - best[1]
+            out["vs_best"] = {
+                "run_id": best[0],
+                "value": best[1],
+                "delta": delta,
+                "improved": _improved(delta, direction),
+            }
+        return out
+
+    def run_abandon(self, *, run_id: str, reason: str) -> dict:
+        if not (reason or "").strip():
+            raise GateError("reason is required — the ledger records why runs were abandoned.")
+        with self.ledger.connect() as con:
+            self._require_goal(con)
+            run = self._get_run(con, run_id)
+            if run is None:
+                raise GateError(f"Unknown run_id '{run_id}'.")
+            if run["status"] != "running":
+                raise GateError(f"Run {run_id} is already {run['status']}.")
+            con.execute(
+                "UPDATE runs SET status = 'abandoned', finished_at = ?, abandon_reason = ? WHERE id = ?",
+                (utcnow(), reason.strip(), run_id),
+            )
+            self.ledger.emit(con, "run_abandoned", {"run_id": run_id, "reason": reason.strip()})
+        return {"ok": True, "run_id": run_id, "status": "abandoned"}
+
+    # ------------------------------------------------------------------
+    # decisions
+    # ------------------------------------------------------------------
+
+    def decision_record(
+        self, *, summary: str, evidence: dict | list | None = None, next_action: str | None = None
+    ) -> dict:
+        if not (summary or "").strip():
+            raise GateError("summary is required: what was decided and on what evidence.")
+        with self.ledger.connect() as con:
+            self._require_goal(con)
+            decision_id = self.ledger.next_id(con, "decisions", "D")
+            con.execute(
+                "INSERT INTO decisions (id, created_at, summary, evidence, next_action) VALUES (?, ?, ?, ?, ?)",
+                (
+                    decision_id,
+                    utcnow(),
+                    summary.strip(),
+                    json.dumps(evidence, ensure_ascii=False) if evidence is not None else None,
+                    next_action,
+                ),
+            )
+            self.ledger.emit(con, "decision_recorded", {"id": decision_id, "summary": summary.strip()})
+        return {"ok": True, "decision_id": decision_id}
+
+    # ------------------------------------------------------------------
+    # diagnostics & forensics (Phase 1)
+    # ------------------------------------------------------------------
+
+    def diagnose_run(self, *, run_id: str) -> dict:
+        import pandas as pd
+
+        from .artifacts import load_dataset
+        from .diagnostics import run_diagnostics
+
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+            run = self._get_run(con, run_id)
+            if run is None:
+                raise GateError(f"Unknown run_id '{run_id}'.")
+            if run["status"] != "finished":
+                raise GateError(f"Run {run_id} is {run['status']} — only finished runs can be diagnosed.")
+            if run["kind"] == "forensics":
+                raise GateError("Diagnostics target baseline/experiment runs; forensics probes are not diagnosed.")
+            existing = con.execute("SELECT results FROM diagnoses WHERE run_id = ?", (run_id,)).fetchone()
+            if existing is not None:
+                return {
+                    "ok": True,
+                    "run_id": run_id,
+                    "already_diagnosed": True,
+                    "results": json.loads(existing["results"]),
+                }
+            try:
+                df = load_dataset(goal["dataset_path"])
+            except (FileNotFoundError, ValueError) as exc:
+                raise GateError(f"cannot load the goal dataset: {exc}") from exc
+            predictions = pd.read_parquet(Path(run["artifact_dir"]) / "predictions.parquet")
+            try:
+                results = run_diagnostics(
+                    df=df,
+                    target_column=goal["target_column"],
+                    task_type=goal["task_type"],
+                    primary_metric=goal["primary_metric"],
+                    metric_direction=goal["metric_direction"],
+                    predictions=predictions,
+                    run_metrics=json.loads(run["metrics"]) if run["metrics"] else {},
+                    out_dir=Path(run["artifact_dir"]) / "diagnostics",
+                )
+            except ValueError as exc:
+                raise GateError(str(exc)) from exc
+            con.execute(
+                "INSERT INTO diagnoses (run_id, created_at, results) VALUES (?, ?, ?)",
+                (run_id, utcnow(), json.dumps(results, ensure_ascii=False)),
+            )
+            self.ledger.emit(
+                con,
+                "run_diagnosed",
+                {"run_id": run_id, "conclusions": [i["conclusion"] for i in results["items"].values()]},
+            )
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "summary": [f"{name}: {item['conclusion']}" for name, item in results["items"].items()],
+            "results": results,
+            "next": (
+                "Form a falsifiable hypothesis from the dominant failure mode "
+                "(hypothesis_register), then run_start the discriminating experiment."
+            ),
+        }
+
+    def forensics_run(self, *, quick: bool = False) -> dict:
+        from .artifacts import load_dataset
+        from .forensics import run_forensics
+
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+            forensics_id = self.ledger.next_id(con, "forensics", "F")
+        try:
+            df = load_dataset(goal["dataset_path"])
+        except (FileNotFoundError, ValueError) as exc:
+            raise GateError(f"cannot load the goal dataset: {exc}") from exc
+        out_dir = self.ledger.root / "forensics" / forensics_id
+        results = run_forensics(
+            df=df,
+            target_column=goal["target_column"],
+            task_type=goal["task_type"],
+            out_dir=out_dir,
+            quick=quick,
+        )
+        verdict = results["verdict"]
+        with self.ledger.connect() as con:
+            con.execute(
+                "INSERT INTO forensics (id, created_at, quick, results, verdict) VALUES (?, ?, ?, ?, ?)",
+                (
+                    forensics_id,
+                    utcnow(),
+                    int(quick),
+                    json.dumps(results, ensure_ascii=False),
+                    json.dumps(verdict, ensure_ascii=False),
+                ),
+            )
+            self.ledger.emit(
+                con,
+                "forensics_completed",
+                {"id": forensics_id, "verdict": verdict["verdict"], "headline": verdict["headline"]},
+            )
+        return {
+            "ok": True,
+            "forensics_id": forensics_id,
+            "verdict": verdict,
+            "summary": [f"{name}: {item['conclusion']}" for name, item in results["items"].items()],
+            "next": "Generate the stakeholder report with report_generate(kind='verdict').",
+        }
+
+    def report_generate(self, *, kind: str = "verdict", output_path: str | None = None) -> dict:
+        from .report import render_experiment_report, render_verdict_report
+
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+            goal_summary = self._goal_summary(goal)
+            if kind == "verdict":
+                row = con.execute("SELECT * FROM forensics ORDER BY rowid DESC LIMIT 1").fetchone()
+                if row is None:
+                    raise GateError("No forensics results yet — run forensics_run first.")
+                out = Path(output_path) if output_path else self.ledger.root / "reports" / f"verdict_{row['id']}.html"
+                path = render_verdict_report(
+                    goal_summary,
+                    json.loads(row["results"]),
+                    json.loads(row["verdict"]),
+                    self.ledger.root / "forensics" / row["id"],
+                    out,
+                )
+            elif kind == "experiment":
+                runs = [
+                    self._run_summary(goal, r)
+                    for r in con.execute("SELECT * FROM runs ORDER BY rowid").fetchall()
+                ]
+                hypotheses = [
+                    self._hypothesis_dict(r)
+                    for r in con.execute("SELECT * FROM hypotheses ORDER BY rowid").fetchall()
+                ]
+                decisions = [
+                    self._decision_dict(r)
+                    for r in con.execute("SELECT * FROM decisions ORDER BY rowid").fetchall()
+                ]
+                best = self._best_run(con, goal)
+                best_run = {"id": best[0], goal["primary_metric"]: best[1]} if best else None
+                out = Path(output_path) if output_path else self.ledger.root / "reports" / "experiment.html"
+                path = render_experiment_report(goal_summary, runs, hypotheses, decisions, best_run, out)
+            else:
+                raise GateError(f"Unknown report kind '{kind}'. Kinds: verdict, experiment.")
+            self.ledger.emit(con, "report_generated", {"kind": kind, "path": str(path)})
+        return {
+            "ok": True,
+            "kind": kind,
+            "path": str(path),
+            "note": "Self-contained HTML — share the single file.",
+        }
+
+    # ------------------------------------------------------------------
+    # queries
+    # ------------------------------------------------------------------
+
+    def status(self) -> dict:
+        with self.ledger.connect() as con:
+            goal = self._goal(con)
+            if goal is None:
+                return {
+                    "state": "NEED_GOAL",
+                    "allowed_actions": ["goal_define"],
+                    "hint": (
+                        "Define the task, dataset, target column and primary metric. "
+                        "This locks the evaluation contract for the whole project."
+                    ),
+                }
+            policy = json.loads(goal["policy"])
+            max_runs = int(policy.get("max_runs", DEFAULT_POLICY["max_runs"]))
+            started = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            hypothesis_counts = dict(
+                con.execute("SELECT status, COUNT(*) FROM hypotheses GROUP BY status").fetchall()
+            )
+            best = self._best_run(con, goal)
+            running = self._running_run(con)
+
+            # Trailing runs that failed to beat the best-so-far — the forensics trigger.
+            direction = goal["metric_direction"]
+            streak = 0
+            best_seen: float | None = None
+            finished_rows = con.execute(
+                "SELECT metrics FROM runs WHERE status = 'finished' "
+                "AND kind IN ('baseline', 'experiment') ORDER BY rowid"
+            ).fetchall()
+            for row in finished_rows:
+                value = self._primary_value(goal, row["metrics"])
+                if value is None:
+                    continue
+                if best_seen is None or _improved(value - best_seen, direction):
+                    best_seen = value
+                    streak = 0
+                else:
+                    streak += 1
+            forensics_after = int(policy.get("forensics_after", 3))
+            latest_forensics = con.execute(
+                "SELECT id, verdict FROM forensics ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+
+            base = {
+                "goal": self._goal_summary(goal),
+                "budget": {
+                    "max_runs": max_runs,
+                    "runs_started": started,
+                    "runs_remaining": max(0, max_runs - started),
+                },
+                "best_run": {"id": best[0], goal["primary_metric"]: best[1]} if best else None,
+                "hypotheses": hypothesis_counts,
+                "stagnation": {
+                    "consecutive_non_improving_runs": streak,
+                    "forensics_recommended": streak >= forensics_after and latest_forensics is None,
+                },
+                "latest_forensics": (
+                    {
+                        "id": latest_forensics["id"],
+                        "verdict": json.loads(latest_forensics["verdict"])["verdict"],
+                        "headline": json.loads(latest_forensics["verdict"])["headline"],
+                    }
+                    if latest_forensics
+                    else None
+                ),
+            }
+            if running is not None:
+                return {
+                    "state": "RUN_IN_PROGRESS",
+                    "running_run": {
+                        "id": running["id"],
+                        "intent": running["intent"],
+                        "artifact_dir": running["artifact_dir"],
+                    },
+                    "allowed_actions": ["run_finish", "run_abandon"],
+                    **base,
+                }
+            if not self._baseline_done(con):
+                return {
+                    "state": "NEED_BASELINE",
+                    "allowed_actions": ["run_start (kind='baseline')"],
+                    "hint": "The first run must be a simple baseline — it anchors every later comparison.",
+                    **base,
+                }
+            pending = self._diagnosis_pending(con)
+            if pending is not None and policy.get("enforce_diagnosis", True):
+                return {
+                    "state": "DIAGNOSE_PENDING",
+                    "allowed_actions": [f"diagnose_run (run_id='{pending}')"],
+                    "hint": (
+                        f"Run {pending} finished but has not been diagnosed. Study its failure "
+                        "modes before hypothesizing — that is where hypotheses come from."
+                    ),
+                    **base,
+                }
+            return {
+                "state": "READY",
+                "allowed_actions": [
+                    "hypothesis_register",
+                    "run_start (kind='experiment', hypothesis_id=...)",
+                    "hypothesis_resolve",
+                    "forensics_run",
+                    "report_generate",
+                    "decision_record",
+                    "ledger_query",
+                ],
+                **base,
+            }
+
+    def ledger_query(self, *, view: str = "summary", run_id: str | None = None, limit: int = 20) -> dict:
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+            if view == "summary":
+                runs = [
+                    self._run_summary(goal, row)
+                    for row in con.execute("SELECT * FROM runs ORDER BY rowid").fetchall()
+                ]
+                hypotheses = [
+                    self._hypothesis_dict(row)
+                    for row in con.execute("SELECT * FROM hypotheses ORDER BY rowid").fetchall()
+                ]
+                decisions = [
+                    self._decision_dict(row)
+                    for row in con.execute("SELECT * FROM decisions ORDER BY rowid").fetchall()
+                ]
+                best = self._best_run(con, goal)
+                return {
+                    "goal": self._goal_summary(goal),
+                    "best_run": {"id": best[0], goal["primary_metric"]: best[1]} if best else None,
+                    "runs": runs[-limit:],
+                    "total_runs": len(runs),
+                    "hypotheses": hypotheses,
+                    "decisions": decisions[-limit:],
+                }
+            if view == "runs":
+                rows = con.execute("SELECT * FROM runs ORDER BY rowid").fetchall()
+                return {"runs": [self._run_summary(goal, row) for row in rows]}
+            if view == "run":
+                if not run_id:
+                    raise GateError("view='run' requires run_id.")
+                row = self._get_run(con, run_id)
+                if row is None:
+                    raise GateError(f"Unknown run_id '{run_id}'.")
+                detail = self._run_summary(goal, row)
+                detail.update(
+                    {
+                        "metrics": json.loads(row["metrics"]) if row["metrics"] else None,
+                        "meta": json.loads(row["meta"]) if row["meta"] else None,
+                        "artifact_report": json.loads(row["artifact_report"]) if row["artifact_report"] else None,
+                        "artifact_dir": row["artifact_dir"],
+                        "abandon_reason": row["abandon_reason"],
+                        "notes": row["notes"],
+                    }
+                )
+                return {"run": detail}
+            if view == "hypotheses":
+                rows = con.execute("SELECT * FROM hypotheses ORDER BY rowid").fetchall()
+                return {"hypotheses": [self._hypothesis_dict(row) for row in rows]}
+            if view == "decisions":
+                rows = con.execute("SELECT * FROM decisions ORDER BY rowid").fetchall()
+                return {"decisions": [self._decision_dict(row) for row in rows]}
+            if view == "events":
+                rows = con.execute(
+                    "SELECT ts, kind, payload FROM events ORDER BY seq DESC LIMIT ?", (limit,)
+                ).fetchall()
+                events = [
+                    {**json.loads(row["payload"]), "ts": row["ts"], "kind": row["kind"]}
+                    for row in reversed(rows)
+                ]
+                return {"events": events}
+            if view == "diagnosis":
+                if not run_id:
+                    raise GateError("view='diagnosis' requires run_id.")
+                row = con.execute("SELECT * FROM diagnoses WHERE run_id = ?", (run_id,)).fetchone()
+                if row is None:
+                    raise GateError(f"No diagnosis for run '{run_id}' — call diagnose_run first.")
+                return {"run_id": run_id, "results": json.loads(row["results"])}
+            if view == "forensics":
+                rows = con.execute("SELECT * FROM forensics ORDER BY rowid").fetchall()
+                entries = [
+                    {"id": row["id"], "created_at": row["created_at"], "quick": bool(row["quick"]),
+                     "verdict": json.loads(row["verdict"])}
+                    for row in rows
+                ]
+                latest = json.loads(rows[-1]["results"]) if rows else None
+                return {"forensics": entries, "latest_results": latest}
+            raise GateError(
+                f"Unknown view '{view}'. Views: summary, runs, run, hypotheses, decisions, "
+                "events, diagnosis, forensics."
+            )

@@ -1,0 +1,186 @@
+"""Self-contained HTML reports: the Data Verdict Report and the experiment report.
+
+One file, inline SVG, no external assets — made to be attached to an email or
+opened in a meeting.
+"""
+
+from __future__ import annotations
+
+import html
+import json
+from pathlib import Path
+
+CSS = """
+body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 2rem;
+       max-width: 900px; margin-inline: auto; color: #1e293b; background: #f8fafc; }
+h1 { font-size: 1.6rem; } h2 { font-size: 1.15rem; margin-top: 2rem; }
+.card { background: white; border: 1px solid #e2e8f0; border-radius: 10px; padding: 1.2rem 1.4rem; margin: 1rem 0; }
+.banner { border-radius: 10px; padding: 1.2rem 1.4rem; margin: 1.2rem 0; color: white; font-size: 1.05rem; }
+.banner.data_limited, .banner.no_signal { background: #c2410c; }
+.banner.model_limited { background: #15803d; }
+.banner.more_data_needed { background: #1d4ed8; }
+.badge { display: inline-block; font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 999px;
+         margin-left: 0.5rem; vertical-align: middle; }
+.badge.high { background: #dcfce7; color: #166534; }
+.badge.medium { background: #fef9c3; color: #854d0e; }
+.badge.low { background: #fee2e2; color: #991b1b; }
+table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+th, td { border-bottom: 1px solid #e2e8f0; padding: 0.4rem 0.6rem; text-align: left; }
+th { color: #64748b; font-weight: 600; }
+.meta { color: #64748b; font-size: 0.85rem; }
+svg { max-width: 100%; height: auto; }
+"""
+
+
+def _esc(value) -> str:
+    return html.escape(str(value))
+
+
+def _inline_svg(charts_dir: Path, name: str | None) -> str:
+    if not name:
+        return ""
+    path = Path(charts_dir) / name
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8")
+    start = text.find("<svg")
+    return text[start:] if start >= 0 else ""
+
+
+def _page(title: str, body: str) -> str:
+    return (
+        f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{_esc(title)}</title>"
+        f"<style>{CSS}</style></head><body>{body}</body></html>"
+    )
+
+
+def _goal_header(goal_summary: dict) -> str:
+    return (
+        f"<p class='meta'>task: {_esc(goal_summary['task_type'])} · "
+        f"dataset: {_esc(goal_summary['dataset_path'])} ({_esc(goal_summary['dataset_rows'])} rows, "
+        f"sha256 {_esc(goal_summary['dataset_sha256'])}) · target: {_esc(goal_summary['target_column'])} · "
+        f"primary metric: {_esc(goal_summary['primary_metric'])} ({_esc(goal_summary['metric_direction'])})</p>"
+    )
+
+
+ITEM_TITLES = {
+    "signal_check": "Is there any signal at all? (shuffled-label test)",
+    "label_noise": "How many labels look wrong? (confident learning)",
+    "conflict_rate": "Do identical inputs disagree? (irreducible-error bound)",
+    "learning_curve": "Would more data help? (learning curve)",
+    "feature_signal": "Which features carry signal? (mutual information)",
+    "simple_model_bound": "What do quick reference models reach?",
+}
+
+
+def render_verdict_report(
+    goal_summary: dict, forensics_results: dict, verdict: dict, charts_dir: Path | str, out_path: Path | str
+) -> Path:
+    charts_dir = Path(charts_dir)
+    parts = ["<h1>Data Verdict Report</h1>", _goal_header(goal_summary)]
+    parts.append(
+        f"<div class='banner {_esc(verdict['verdict'])}'><strong>Verdict: "
+        f"{_esc(verdict['verdict'].replace('_', ' '))}</strong> "
+        f"(confidence: {_esc(verdict['confidence'])})<br>{_esc(verdict['headline'])}</div>"
+    )
+    if verdict.get("recommendations"):
+        recs = "".join(f"<li>{_esc(r)}</li>" for r in verdict["recommendations"])
+        parts.append(f"<div class='card'><strong>Recommended actions</strong><ul>{recs}</ul></div>")
+
+    for key, item in forensics_results["items"].items():
+        title = ITEM_TITLES.get(key, key)
+        badge = item.get("confidence", "")
+        badge_html = f"<span class='badge {badge}'>{badge} confidence</span>" if badge else ""
+        section = [f"<h2>{_esc(title)}{badge_html}</h2>", "<div class='card'>"]
+        section.append(f"<p>{_esc(item['conclusion'])}</p>")
+        section.append(_inline_svg(charts_dir, item.get("chart")))
+        if key == "label_noise" and item["details"].get("suspects"):
+            rows = "".join(
+                f"<tr><td>{s['dataset_row']}</td><td>{_esc(s['given_label'])}</td>"
+                f"<td>{_esc(s['suggested_label'])}</td><td>{s['label_quality']}</td></tr>"
+                for s in item["details"]["suspects"][:15]
+            )
+            section.append(
+                "<p><strong>Most suspect labels</strong> (lowest quality first):</p>"
+                "<table><tr><th>dataset row</th><th>given label</th><th>suggested label</th>"
+                f"<th>quality score</th></tr>{rows}</table>"
+            )
+        section.append("</div>")
+        parts.append("".join(section))
+
+    parts.append(
+        f"<p class='meta'>Generated by MLLoop · rows used: {forensics_results['n_rows_used']}"
+        + (" (subsampled)" if forensics_results.get("subsampled") else "")
+        + f" · reference scoring: {_esc(forensics_results['scoring'])}</p>"
+    )
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(_page("MLLoop Data Verdict Report", "".join(parts)), encoding="utf-8")
+    return out_path
+
+
+def render_experiment_report(
+    goal_summary: dict,
+    runs: list[dict],
+    hypotheses: list[dict],
+    decisions: list[dict],
+    best_run: dict | None,
+    out_path: Path | str,
+) -> Path:
+    metric = goal_summary["primary_metric"]
+    parts = ["<h1>Experiment Report</h1>", _goal_header(goal_summary)]
+    if best_run:
+        parts.append(
+            f"<div class='banner model_limited'><strong>Best run: {_esc(best_run['id'])}</strong> — "
+            f"{_esc(metric)} = {best_run[metric]}</div>"
+        )
+
+    finished = [r for r in runs if r.get(metric) is not None]
+    if len(finished) >= 2:
+        from . import viz
+
+        fig, ax = viz.new_fig()
+        ax.plot(range(1, len(finished) + 1), [r[metric] for r in finished], marker="o", color=viz.ACCENT)
+        ax.set_xticks(range(1, len(finished) + 1), [r["id"] for r in finished])
+        ax.set_ylabel(metric)
+        ax.set_xlabel("run")
+        chart_path = Path(out_path).parent / "trajectory.svg"
+        viz.save_svg(fig, chart_path)
+        parts.append("<div class='card'>" + _inline_svg(chart_path.parent, chart_path.name) + "</div>")
+
+    rows = "".join(
+        f"<tr><td>{_esc(r['id'])}</td><td>{_esc(r['kind'])}</td><td>{_esc(r['status'])}</td>"
+        f"<td>{_esc(r['hypothesis_id'] or '—')}</td><td>{_esc(r['intent'])}</td>"
+        f"<td>{r.get(metric) if r.get(metric) is not None else '—'}</td></tr>"
+        for r in runs
+    )
+    parts.append(
+        f"<h2>Runs</h2><div class='card'><table><tr><th>run</th><th>kind</th><th>status</th>"
+        f"<th>hypothesis</th><th>intent</th><th>{_esc(metric)}</th></tr>{rows}</table></div>"
+    )
+
+    hyp_rows = "".join(
+        f"<tr><td>{_esc(h['id'])}</td><td>{_esc(h['status'])}</td><td>{_esc(h['statement'])}</td>"
+        f"<td>{_esc(h['prediction'])}</td><td>{_esc(h['resolution_narrative'] or '—')}</td></tr>"
+        for h in hypotheses
+    )
+    parts.append(
+        "<h2>Hypotheses</h2><div class='card'><table><tr><th>id</th><th>status</th>"
+        f"<th>statement</th><th>prediction</th><th>resolution</th></tr>{hyp_rows}</table></div>"
+    )
+
+    if decisions:
+        dec_rows = "".join(
+            f"<tr><td>{_esc(d['id'])}</td><td>{_esc(d['summary'])}</td><td>{_esc(d['next_action'] or '—')}</td></tr>"
+            for d in decisions
+        )
+        parts.append(
+            "<h2>Decisions</h2><div class='card'><table><tr><th>id</th><th>decision</th>"
+            f"<th>next action</th></tr>{dec_rows}</table></div>"
+        )
+
+    parts.append("<p class='meta'>Generated by MLLoop</p>")
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(_page("MLLoop Experiment Report", "".join(parts)), encoding="utf-8")
+    return out_path
