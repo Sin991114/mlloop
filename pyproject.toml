@@ -34,7 +34,8 @@ dev = ["pytest>=8"]
 mlloop = "mlloop.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/mlloop/mlloop"
+Homepage = "https://github.com/Sin991114/mlloop"
+Issues = "https://github.com/Sin991114/mlloop/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mlloop"]
