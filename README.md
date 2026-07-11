@@ -17,8 +17,10 @@ that loop at the tool layer, not via prompts:
 - **Artifact contract** — each run writes standardized `predictions.parquet` + `meta.json`;
   diagnostics never read your training code, so any framework works.
 - **Diagnostics battery** — after every run: error slices, bootstrap noise floor ("what
-  delta counts as evidence"), confusion/residuals, calibration, overfit gap. Diagnosing
-  the previous run is itself a gate: no diagnosis, no next experiment.
+  delta counts as evidence"), confusion/residuals, calibration, the operating curve
+  (overkill vs catch rate, with degenerate-prediction detection), a SHAP explanation of
+  missed positives (are they feature-limited or learnable?), and the overfit gap.
+  Diagnosing the previous run is itself a gate: no diagnosis, no next experiment.
 - **Data Verdict Report** — when runs stagnate, `forensics_run` interrogates the dataset
   with independent probes (shuffled-label signal check, confident-learning label-noise
   estimation, conflicting-duplicate bound, learning curve, per-feature signal) and

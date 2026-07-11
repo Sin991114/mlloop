@@ -166,3 +166,52 @@ def test_forensics_runs_excluded_from_best(svc_ready, make_artifacts):
     svc_ready.run_finish(run_id=run["run_id"], metrics={"auc": 0.99})
     best = svc_ready.status()["best_run"]
     assert best["id"] == "R1", "a forensics probe must never be crowned best run"
+
+
+def test_operating_curve_flags_degenerate_predictions(svc_ready):
+    # conftest artifacts use a constant proba_1=0.5 — ranking is meaningless.
+    items = svc_ready.ledger_query(view="diagnosis", run_id="R1")["results"]["items"]
+    assert "constant" in items["operating_curve"]["conclusion"]
+    assert items["operating_curve"]["chart"] is None
+
+
+def test_operating_curve_and_missed_positives(svc_with_goal):
+    import json as js
+    from pathlib import Path
+
+    svc = svc_with_goal
+    run = svc.run_start(intent="baseline", kind="baseline")
+    n = 100
+    rng = np.random.default_rng(0)
+    y = np.array([i % 2 for i in range(n)])
+    proba = np.clip(np.where(y == 1, 0.8, 0.2) + rng.normal(0, 0.05, n), 0, 1)
+    missed = np.where(y == 1)[0][:10]
+    proba[missed] = 0.2  # ten uncaught positives
+    d = Path(run["artifact_dir"])
+    pd.DataFrame(
+        {"row_id": range(n), "y_true": y, "y_pred": (proba >= 0.5).astype(int), "proba_1": proba}
+    ).to_parquet(d / "predictions.parquet", index=False)
+    (d / "meta.json").write_text(
+        js.dumps({"model_desc": "m", "hyperparams": {}, "features": ["f1", "f2"], "seed": 0})
+    )
+    svc.run_finish(run_id=run["run_id"], metrics={"auc": 0.9})
+
+    items = svc.diagnose_run(run_id=run["run_id"])["results"]["items"]
+
+    curve = items["operating_curve"]
+    assert curve["chart"] is not None
+    assert curve["details"]["operating_points"]["recall_at_10pct_overkill"] > 0
+
+    missed_item = items["missed_positives"]
+    assert missed_item["details"]["n_missed"] == 10
+    frac = missed_item["details"]["fraction_feature_limited"]
+    assert 0.0 <= frac <= 1.0
+    assert missed_item["details"]["features_pulling_toward_negative"]
+    assert missed_item["chart"] is not None
+
+
+def test_diagnose_refresh_recomputes(svc_ready):
+    assert svc_ready.diagnose_run(run_id="R1").get("already_diagnosed") is True
+    again = svc_ready.diagnose_run(run_id="R1", refresh=True)
+    assert "already_diagnosed" not in again
+    assert "operating_curve" in again["results"]["items"]

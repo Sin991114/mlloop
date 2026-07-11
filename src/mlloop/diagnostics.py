@@ -67,9 +67,22 @@ def run_diagnostics(
     items["noise_floor"] = _noise_floor(primary_metric, task_type, y_true, y_pred, proba)
     if task_type == "classification":
         items["confusion"] = _confusion(y_true, y_pred, out_dir)
-        if proba is not None and len(np.unique(y_true)) == 2:
+        binary = len(np.unique(y_true)) == 2
+        if proba is not None and binary:
             items["calibration"] = _calibration(y_true, proba, out_dir)
+            items["operating_curve"] = _operating_curve(y_true, proba, out_dir)
         items["class_balance"] = _class_balance(y_true)
+        if binary:
+            try:
+                items["missed_positives"] = _missed_positives(
+                    df, target_column, predictions, y_true, y_pred, out_dir
+                )
+            except Exception as exc:  # the explanation must never sink the whole diagnosis
+                items["missed_positives"] = {
+                    "conclusion": f"missed-positive explanation failed: {exc}",
+                    "details": {},
+                    "chart": None,
+                }
     else:
         items["residuals"] = _residuals(y_true.astype(float), y_pred.astype(float), out_dir)
     items["overfit_gap"] = _overfit_gap(primary_metric, metric_direction, run_metrics)
@@ -276,6 +289,156 @@ def _residuals(y_true, y_pred, out_dir) -> dict:
     return {
         "conclusion": conclusion,
         "details": {"bias": bias, "residual_std": float(residuals.std()), "heteroscedasticity_corr": het},
+        "chart": chart,
+    }
+
+
+def _operating_curve(y_true, proba, out_dir) -> dict:
+    """Overkill (share of good flagged) vs catch rate (recall) across thresholds.
+
+    Makes the AUC operational — and exposes degenerate predictions (e.g. a
+    constant score) that a bare AUC number can hide.
+    """
+    from sklearn.metrics import roc_curve
+
+    y_true = np.asarray(y_true)
+    positive = np.max(y_true)
+    y_bin = (y_true == positive).astype(int)
+    n_distinct = int(len(np.unique(proba)))
+    if n_distinct < 3:
+        return {
+            "conclusion": (
+                f"predicted probabilities are (nearly) constant ({n_distinct} distinct value(s)) — "
+                "the model does not rank rows, so AUC and any threshold choice are meaningless "
+                "for this run"
+            ),
+            "details": {"n_distinct_probabilities": n_distinct},
+            "chart": None,
+        }
+
+    fpr, tpr, _ = roc_curve(y_bin, proba)
+
+    def recall_at(overkill: float) -> float:
+        return float(tpr[max(np.searchsorted(fpr, overkill, side="right") - 1, 0)])
+
+    def overkill_at(recall: float) -> float | None:
+        if tpr.max() < recall:
+            return None
+        return float(fpr[np.argmax(tpr >= recall)])
+
+    points = {
+        "recall_at_5pct_overkill": round(recall_at(0.05), 3),
+        "recall_at_10pct_overkill": round(recall_at(0.10), 3),
+        "recall_at_20pct_overkill": round(recall_at(0.20), 3),
+        "overkill_for_80pct_recall": overkill_at(0.80),
+        "overkill_for_90pct_recall": overkill_at(0.90),
+    }
+
+    fig, ax = viz.new_fig(5.4, 4.6)
+    ax.plot(fpr, tpr, color=viz.ACCENT)
+    ax.plot([0, 1], [0, 1], color=viz.MUTED, linestyle="--", linewidth=1)
+    for x in (0.05, 0.10, 0.20):
+        r = recall_at(x)
+        ax.scatter([x], [r], color=viz.WARN, zorder=3, s=25)
+        ax.annotate(f"{r:.0%} @ {x:.0%}", (x, r), textcoords="offset points", xytext=(8, -4), fontsize=8)
+    ax.set_xlabel("overkill — share of good flagged (FPR)")
+    ax.set_ylabel("catch rate — share of bad caught (recall)")
+    chart = viz.save_svg(fig, out_dir / "operating_curve.svg")
+
+    ov80 = points["overkill_for_80pct_recall"]
+    cost = f"catching 80% of positives costs {ov80:.0%} overkill" if ov80 is not None else "80% recall is unreachable"
+    conclusion = f"{cost}; at 10% overkill you catch {points['recall_at_10pct_overkill']:.0%} of positives"
+    points = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in points.items()}
+    return {"conclusion": conclusion, "details": {"operating_points": points}, "chart": chart}
+
+
+def _missed_positives(df, target_column, predictions, y_true, y_pred, out_dir) -> dict:
+    """Explain the uncaught positives: feature-limited or model-limited?
+
+    An out-of-fold reference model scores every missed positive. Rows the
+    reference model also scores as negative look like 'good data' to the
+    current features — no model can catch them. SHAP shows which features
+    pull them toward the negative class.
+    """
+    try:
+        import shap
+    except ImportError:
+        return {
+            "conclusion": "shap is not installed — `pip install shap` enables missed-positive explanations",
+            "details": {},
+            "chart": None,
+        }
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.model_selection import StratifiedKFold, cross_val_predict
+
+    from .tabular import prepare
+
+    positive = np.max(y_true)
+    fn_mask = (y_true == positive) & (y_pred != positive)
+    n_caught = int(((y_true == positive) & (y_pred == positive)).sum())
+    fn_rows = predictions["row_id"].to_numpy()[fn_mask]
+    if fn_rows.size == 0:
+        return {
+            "conclusion": "no missed positives in the held-out predictions — nothing to explain",
+            "details": {"n_missed": 0, "n_caught": n_caught},
+            "chart": None,
+        }
+
+    prep = prepare(df, target_column, "classification")
+    position_of = {int(r): i for i, r in enumerate(prep["original_row_index"])}
+    fn_positions = np.array([position_of[int(r)] for r in fn_rows if int(r) in position_of])
+    X, y = prep["X"], prep["y"]
+    positive_code = int(np.bincount(y[fn_positions]).argmax())  # FN rows are true positives
+
+    reference = HistGradientBoostingClassifier(
+        random_state=0, max_iter=200, learning_rate=0.05, min_samples_leaf=30
+    )
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+    oof = cross_val_predict(reference, X, y, cv=cv, method="predict_proba")[:, positive_code]
+    fn_oof = oof[fn_positions]
+    fraction_feature_limited = float((fn_oof < 0.5).mean())
+
+    reference.fit(X, y)
+    sample = fn_positions
+    if len(sample) > 400:
+        sample = np.random.default_rng(0).choice(fn_positions, 400, replace=False)
+    values = shap.TreeExplainer(reference)(X[sample]).values
+    if values.ndim == 3:  # (rows, features, classes)
+        values = values[:, :, positive_code]
+    elif positive_code == 0:
+        values = -values
+    names = prep["feature_names"]
+    pulling_negative = sorted(zip(names, values.mean(axis=0)), key=lambda t: t[1])[:5]
+
+    import matplotlib.pyplot as plt
+
+    shap.plots.beeswarm(
+        shap.Explanation(values=values, base_values=np.zeros(len(values)),
+                         data=X[sample], feature_names=names),
+        max_display=12, show=False,
+    )
+    chart = viz.save_svg(plt.gcf(), out_dir / "missed_positives_shap.svg")
+
+    top = ", ".join(f"{name} ({value:+.2f})" for name, value in pulling_negative[:3])
+    conclusion = (
+        f"of {fn_rows.size} missed positives, {fraction_feature_limited:.0%} look like negatives even to an "
+        f"out-of-fold reference model — feature-limited rows no model can catch with these features; "
+        f"{1 - fraction_feature_limited:.0%} are learnable misses. "
+        f"Features pulling the missed toward 'good': {top}"
+    )
+    return {
+        "conclusion": conclusion,
+        "details": {
+            "n_missed": int(fn_rows.size),
+            "n_caught": n_caught,
+            "fraction_feature_limited": round(fraction_feature_limited, 3),
+            "fraction_learnable": round(1 - fraction_feature_limited, 3),
+            "mean_reference_oof_proba_on_missed": round(float(fn_oof.mean()), 3),
+            "features_pulling_toward_negative": [
+                {"feature": name, "mean_shap": round(float(value), 3)}
+                for name, value in pulling_negative
+            ],
+        },
         "chart": chart,
     }
 

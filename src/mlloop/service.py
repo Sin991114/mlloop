@@ -654,7 +654,7 @@ class LedgerService:
     # diagnostics & forensics (Phase 1)
     # ------------------------------------------------------------------
 
-    def diagnose_run(self, *, run_id: str) -> dict:
+    def diagnose_run(self, *, run_id: str, refresh: bool = False) -> dict:
         import pandas as pd
 
         from .artifacts import load_dataset
@@ -670,7 +670,7 @@ class LedgerService:
             if run["kind"] == "forensics":
                 raise GateError("Diagnostics target baseline/experiment runs; forensics probes are not diagnosed.")
             existing = con.execute("SELECT results FROM diagnoses WHERE run_id = ?", (run_id,)).fetchone()
-            if existing is not None:
+            if existing is not None and not refresh:
                 return {
                     "ok": True,
                     "run_id": run_id,
@@ -696,7 +696,7 @@ class LedgerService:
             except ValueError as exc:
                 raise GateError(str(exc)) from exc
             con.execute(
-                "INSERT INTO diagnoses (run_id, created_at, results) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO diagnoses (run_id, created_at, results) VALUES (?, ?, ?)",
                 (run_id, utcnow(), json.dumps(results, ensure_ascii=False)),
             )
             self.ledger.emit(

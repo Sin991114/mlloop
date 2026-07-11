@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `operating_curve` diagnostic: overkill (share of good flagged) vs catch rate
+  (recall) with named operating points, plus degenerate-prediction detection — a
+  constant score now reports "AUC is meaningless for this run" instead of hiding
+  behind the number.
+- `missed_positives` diagnostic: an out-of-fold reference model splits uncaught
+  positives into feature-limited rows (they look like negatives to any model) vs
+  learnable misses, with a SHAP beeswarm of what pulls them toward the negative
+  class. Requires `shap` (now a dependency).
+- `diagnose_run(refresh=True)` recomputes a stored diagnosis with the current
+  battery.
+
+### Fixed
+- Forensics-kind runs are excluded from best-run selection: their metrics come
+  from deliberately different (possibly contaminated) evaluation protocols.
+
 ## [0.0.1] - 2026-07-11
 
 ### Added — Phase 0: ledger & gates

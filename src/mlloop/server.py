@@ -180,15 +180,18 @@ def create_server(workspace: str | None = None) -> FastMCP:
         )
 
     @mcp.tool()
-    def diagnose_run(run_id: str) -> str:
+    def diagnose_run(run_id: str, refresh: bool = False) -> str:
         """Run the diagnostics battery on a finished run: error slices, metric noise floor,
-        confusion/residuals, calibration, class balance, overfit gap.
+        confusion/residuals, calibration, operating curve (overkill vs catch rate, with
+        degenerate-prediction detection), missed-positive SHAP explanation
+        (feature-limited vs learnable misses), class balance, overfit gap.
 
         Required after every finished run before the next experiment can start. The noise
         floor tells you the minimum delta that counts as evidence rather than noise.
         Hypotheses should be derived from the dominant failure mode found here.
+        refresh=True recomputes a stored diagnosis with the current battery.
         """
-        return call(service.diagnose_run, run_id=run_id)
+        return call(service.diagnose_run, run_id=run_id, refresh=refresh)
 
     @mcp.tool()
     def forensics_run(quick: bool = False) -> str:
