@@ -239,7 +239,8 @@ footer { margin-top: 3.5rem; border-top: 1px solid var(--hairline); padding-top:
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt = (v, d = 4) => v == null ? "—" : (typeof v === "number" ? +v.toFixed(d) : v);
-let state = null, lastHash = "", view = "journey";
+let state = null, lastHash = "";
+let view = localStorage.getItem("mlloop-view") || "lineage";
 
 /* ---------- theme ---------- */
 const savedTheme = localStorage.getItem("mlloop-theme");
@@ -616,7 +617,7 @@ function closeDrawer() { $("drawer").classList.remove("open"); $("backdrop").sty
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
 
 /* ---------- assembly ---------- */
-function setView(v) { view = v; render(); }
+function setView(v) { view = v; localStorage.setItem("mlloop-view", v); render(); }
 function render() {
   if (!state) return;
   renderMasthead();
@@ -632,8 +633,8 @@ function render() {
       <div class="sec-head"><span class="sec-num">I.</span><span class="sec-title">Trajectory</span>
         <span class="sec-rule"></span>
         <span class="sec-tools">
-          <button class="${view === "journey" ? "on" : ""}" onclick="setView('journey')">journey</button>
           <button class="${view === "lineage" ? "on" : ""}" onclick="setView('lineage')">lineage</button>
+          <button class="${view === "journey" ? "on" : ""}" onclick="setView('journey')">journey</button>
         </span></div>
       <div class="card" id="viz"></div>
     </section>
