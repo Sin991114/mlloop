@@ -940,7 +940,7 @@ class LedgerService:
                 )
             else:
                 raise GateError(f"Unknown report kind '{kind}'. Kinds: verdict, experiment.")
-            self.ledger.emit(con, "report_generated", {"kind": kind, "path": str(path)})
+            self.ledger.emit(con, "report_generated", {"report_kind": kind, "path": str(path)})
         return {
             "ok": True,
             "kind": kind,

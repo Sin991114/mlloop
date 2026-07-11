@@ -42,6 +42,9 @@ def create_app(workspace: str | None = None) -> FastAPI:
             "hypotheses": [],
             "decisions": [],
             "forensics": [],
+            "context": [],
+            "fe_probes": [],
+            "events": [],
         }
         if status["state"] == "NEED_GOAL":
             return payload
@@ -49,6 +52,19 @@ def create_app(workspace: str | None = None) -> FastAPI:
         payload["hypotheses"] = service.ledger_query(view="hypotheses")["hypotheses"]
         payload["decisions"] = service.ledger_query(view="decisions")["decisions"]
         payload["forensics"] = service.ledger_query(view="forensics")["forensics"]
+        payload["context"] = service.ledger_query(view="context")["feature_context"]
+        payload["fe_probes"] = service.ledger_query(view="fe_probes")["fe_probes"]
+        payload["events"] = service.ledger_query(view="events", limit=80)["events"]
+        # Per-run noise floor (minimum believable improvement) from its diagnosis.
+        with service.ledger.connect() as con:
+            rows = con.execute("SELECT run_id, results FROM diagnoses").fetchall()
+        floors = {}
+        for row in rows:
+            details = json.loads(row["results"])["items"].get("noise_floor", {}).get("details", {})
+            if details.get("min_significant_delta") is not None:
+                floors[row["run_id"]] = details["min_significant_delta"]
+        for run in payload["runs"]:
+            run["noise_floor"] = floors.get(run["id"])
         return payload
 
     @app.get("/api/run/{run_id}")
