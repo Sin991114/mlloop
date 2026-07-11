@@ -10,6 +10,14 @@ def test_full_loop(svc_with_goal, make_artifacts, workspace):
     assert result["ok"]
     assert result["comparison"]["vs_parent"] is None
 
+    # Reproducibility deliverables recorded and predictions.csv auto-generated
+    from pathlib import Path
+
+    assert (Path(baseline["artifact_dir"]) / "predictions.csv").exists()
+    assert result["deliverables"]["training_script"] == "train.py"
+    assert result["deliverables"]["inference_script"] == "infer.py"
+    assert result["deliverables"]["model_file"] == "model.pkl"
+
     # Diagnosis gate: no experiment until the finished run is diagnosed
     assert svc.status()["state"] == "DIAGNOSE_PENDING"
     diagnosis = svc.diagnose_run(run_id=baseline["run_id"])

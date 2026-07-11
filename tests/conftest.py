@@ -64,8 +64,12 @@ def make_artifacts():
             "seed": seed,
             "train_seconds": 1.2,
         }
+        meta.setdefault("feature_importance", {"f1": 0.6, "f2": 0.4})
         meta.update(meta_overrides or {})
         (run_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        (run_dir / "train.py").write_text(f"# seeded training stub\nSEED = {seed}\n", encoding="utf-8")
+        (run_dir / "infer.py").write_text("# inference stub: python infer.py in.csv out.csv\n", encoding="utf-8")
+        (run_dir / "model.pkl").write_bytes(b"stub-model-bytes")
         if with_cv:
             df.to_parquet(run_dir / "cv_predictions.parquet", index=False)
         return run_dir

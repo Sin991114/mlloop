@@ -22,6 +22,30 @@ REQUIRED_META_KEYS: dict[str, type] = {
 }
 
 
+def _file_sha256(path: Path) -> str:
+    sha = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            sha.update(chunk)
+    return sha.hexdigest()
+
+
+def find_artifact_file(run_dir: Path, stem: str) -> Path | None:
+    """First non-empty file named ``<stem>.*`` in the run directory."""
+    for path in sorted(Path(run_dir).glob(f"{stem}.*")):
+        if path.is_file() and path.stat().st_size > 0:
+            return path
+    return None
+
+
+def export_predictions_csv(run_dir: Path | str) -> Path:
+    """Materialize predictions.parquet as predictions.csv (called by run_finish)."""
+    run_dir = Path(run_dir)
+    out = run_dir / "predictions.csv"
+    pd.read_parquet(run_dir / "predictions.parquet").to_csv(out, index=False)
+    return out
+
+
 def load_dataset(path: Path | str) -> pd.DataFrame:
     """Load a csv/tsv/parquet dataset."""
     path = Path(path)
@@ -40,17 +64,12 @@ def fingerprint_dataset(path: Path | str) -> dict:
     path = Path(path)
     df = load_dataset(path)
 
-    sha = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            sha.update(chunk)
-
     return {
         "path": str(path.resolve()),
         "rows": int(len(df)),
         "columns": {name: str(dtype) for name, dtype in df.dtypes.items()},
         "file_bytes": path.stat().st_size,
-        "sha256": sha.hexdigest(),
+        "sha256": _file_sha256(path),
     }
 
 
@@ -112,8 +131,43 @@ def validate_run_artifacts(run_dir: Path | str, task_type: str) -> dict:
                         )
                 if "train_seconds" not in (meta or {}):
                     warnings.append("meta.json: 'train_seconds' is recommended")
+                if "feature_importance" not in (meta or {}):
+                    warnings.append(
+                        "meta.json: 'feature_importance' is recommended "
+                        "(dict of feature -> importance)"
+                    )
         except json.JSONDecodeError as exc:
             errors.append(f"meta.json is not valid JSON: {exc}")
+
+    # Reproducibility deliverables: every run ships the code and the model
+    # needed to reproduce it and to score unseen data.
+    train_script = find_artifact_file(run_dir, "train")
+    if train_script is None:
+        errors.append(
+            "train.* is missing — every run must ship a self-contained, seeded training "
+            "script that reproduces this model end-to-end (e.g. train.py)"
+        )
+    infer_script = find_artifact_file(run_dir, "infer")
+    if infer_script is None:
+        errors.append(
+            "infer.* is missing — every run must ship an inference script that loads the "
+            "model file and scores unseen data (convention: `python infer.py <input.csv> "
+            "<output.csv>`)"
+        )
+    model_file = find_artifact_file(run_dir, "model")
+    if model_file is None:
+        errors.append(
+            "model.* is missing — serialize the trained model "
+            "(model.joblib / model.pkl / model.txt / ...)"
+        )
+    reproducibility = {
+        "train_script": train_script.name if train_script else None,
+        "train_sha256": _file_sha256(train_script) if train_script else None,
+        "infer_script": infer_script.name if infer_script else None,
+        "infer_sha256": _file_sha256(infer_script) if infer_script else None,
+        "model_file": model_file.name if model_file else None,
+        "model_bytes": model_file.stat().st_size if model_file else None,
+    }
 
     if not (run_dir / "cv_predictions.parquet").exists():
         warnings.append(
@@ -127,4 +181,5 @@ def validate_run_artifacts(run_dir: Path | str, task_type: str) -> dict:
         "warnings": warnings,
         "num_prediction_rows": num_rows,
         "meta": meta,
+        "reproducibility": reproducibility,
     }

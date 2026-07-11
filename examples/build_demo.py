@@ -50,7 +50,11 @@ def main() -> None:
             "model_desc": run["run_id"], "hyperparams": {"seed": seed},
             "features": ["signal_a", "signal_b", "noise_feat"], "seed": seed,
             "train_seconds": 3.2,
+            "feature_importance": {"signal_a": 0.45, "signal_b": 0.45, "noise_feat": 0.1},
         }))
+        (d / "train.py").write_text(f"# demo training stub (seeded)\nSEED = {seed}\n")
+        (d / "infer.py").write_text("# demo inference stub: python infer.py in.csv out.csv\n")
+        (d / "model.pkl").write_bytes(b"demo-model-stub")
 
     def run_cycle(intent, auc, kind="experiment", hypothesis_id=None, seed=0):
         run = svc.run_start(intent=intent, kind=kind, hypothesis_id=hypothesis_id)

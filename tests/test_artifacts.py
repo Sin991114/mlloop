@@ -60,3 +60,37 @@ def test_regression_without_proba_no_warning(tmp_path, make_artifacts):
     make_artifacts(tmp_path, with_proba=False)
     report = validate_run_artifacts(tmp_path, "regression")
     assert not any("proba" in warning for warning in report["warnings"])
+
+
+def test_missing_reproducibility_deliverables(tmp_path, make_artifacts):
+    make_artifacts(tmp_path)
+    (tmp_path / "train.py").unlink()
+    (tmp_path / "infer.py").unlink()
+    (tmp_path / "model.pkl").unlink()
+    report = validate_run_artifacts(tmp_path, "classification")
+    assert not report["valid"]
+    joined = " ".join(report["errors"])
+    for marker in ("train.*", "infer.*", "model.*"):
+        assert marker in joined
+
+
+def test_reproducibility_recorded(tmp_path, make_artifacts):
+    make_artifacts(tmp_path)
+    report = validate_run_artifacts(tmp_path, "classification")
+    assert report["valid"]
+    repro = report["reproducibility"]
+    assert repro["train_script"] == "train.py"
+    assert len(repro["train_sha256"]) == 64
+    assert repro["infer_script"] == "infer.py"
+    assert repro["model_file"] == "model.pkl"
+    assert repro["model_bytes"] > 0
+
+
+def test_missing_feature_importance_warns(tmp_path, make_artifacts):
+    make_artifacts(tmp_path)
+    meta = json.loads((tmp_path / "meta.json").read_text())
+    del meta["feature_importance"]
+    (tmp_path / "meta.json").write_text(json.dumps(meta))
+    report = validate_run_artifacts(tmp_path, "classification")
+    assert report["valid"]
+    assert any("feature_importance" in warning for warning in report["warnings"])

@@ -194,6 +194,9 @@ def test_operating_curve_and_missed_positives(svc_with_goal):
     (d / "meta.json").write_text(
         js.dumps({"model_desc": "m", "hyperparams": {}, "features": ["f1", "f2"], "seed": 0})
     )
+    (d / "train.py").write_text("SEED = 0\n")
+    (d / "infer.py").write_text("# infer stub\n")
+    (d / "model.pkl").write_bytes(b"stub")
     svc.run_finish(run_id=run["run_id"], metrics={"auc": 0.9})
 
     items = svc.diagnose_run(run_id=run["run_id"])["results"]["items"]

@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   class. Requires `shap` (now a dependency).
 - `diagnose_run(refresh=True)` recomputes a stored diagnosis with the current
   battery.
+- Reproducibility deliverables in the artifact contract: every run must now ship
+  `train.*` (self-contained seeded training script), `infer.*` (scores unseen data
+  from the shipped model), and `model.*` (the serialized model). `run_finish`
+  records the sha256 of both scripts in the ledger and auto-generates
+  `predictions.csv` from the parquet. `meta.json` gains a recommended
+  `feature_importance` key.
 
 ### Fixed
 - Forensics-kind runs are excluded from best-run selection: their metrics come
