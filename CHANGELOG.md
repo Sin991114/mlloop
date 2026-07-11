@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Custom metric scripts: `goal_define(metric_script=...)` or the new
+  `metric_register` tool attach a python file defining
+  `metric(predictions: DataFrame) -> float`; the noise floor then bootstraps the
+  REAL primary metric instead of falling back to accuracy. Field-fixed on the
+  Higgs workspace: the AMS noise floor is now ±0.19 AMS (was an accuracy-unit
+  ±0.003) — which also shows the plateau runs were statistically inevitable.
+- Metric-choice guardrails at `goal_define`: a known metric that mismatches the
+  task type is refused (e.g. rmse on classification); accuracy on imbalanced
+  classification returns a `metric_advisory` (majority-class baseline already
+  scores that high) without blocking.
+- The MCP server now auto-serves the dashboard in-process and opens the user's
+  browser on the first tool call; every tool response carries `dashboard_url`.
+  Disable with `MLLOOP_NO_DASHBOARD=1`; port via `MLLOOP_DASHBOARD_PORT`
+  (default 8137, scanning upward if taken).
+- Dashboard redesigned as **The Lab Ledger**: morning-review reading order
+  (state strip → stat tiles → lineage tree/journey chart → narrated overnight
+  log → evidence rail with hypothesis claims, verdict, FE probes, and the data
+  dictionary), run dossier drawer with deliverables and captioned figures,
+  editorial paper/ink aesthetic with light + dark themes. Lineage is the
+  default view; `/api/state` now includes context, fe_probes, events, and
+  per-run noise floors.
+
+### Fixed
+- `report_generated` event payload key renamed to `report_kind` (collided with
+  the event-kind key and garbled the event log).
+
 ## [0.0.2] - 2026-07-11
 
 ### Added

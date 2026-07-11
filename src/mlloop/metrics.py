@@ -65,6 +65,69 @@ def resolve_metric(name: str, task_type: str) -> tuple[MetricSpec, bool]:
     return _REGISTRY[FALLBACKS[task_type]], True
 
 
+def known_metric(name: str) -> MetricSpec | None:
+    return _REGISTRY.get((name or "").strip().lower())
+
+
+def load_metric_script(path):
+    """Load a custom metric: a python file defining metric(predictions) -> float.
+
+    ``predictions`` is the run's predictions DataFrame (row_id, y_true, y_pred,
+    proba_* and any extra columns the training code shipped), so domain metrics
+    like weighted significance are fully expressible.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"metric script not found: {path}")
+    spec = importlib.util.spec_from_file_location(
+        f"mlloop_metric_{abs(hash(str(path)))}", path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    fn = getattr(module, "metric", None)
+    if not callable(fn):
+        raise ValueError(
+            "metric script must define a callable `metric(predictions: pandas.DataFrame) -> float`"
+        )
+    return fn
+
+
+def bootstrap_noise_floor_custom(
+    name: str, fn, predictions, n_boot: int = 200, seed: int = 0
+) -> dict | None:
+    """Bootstrap a custom metric by resampling prediction rows."""
+    rng = np.random.default_rng(seed)
+    n = len(predictions)
+    values = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        try:
+            value = float(fn(predictions.iloc[idx].reset_index(drop=True)))
+        except Exception:
+            continue
+        if np.isfinite(value):
+            values.append(value)
+    if len(values) < max(20, n_boot // 4):
+        return None
+    arr = np.asarray(values)
+    std = float(arr.std(ddof=1))
+    return {
+        "metric": name,
+        "n_boot": len(values),
+        "mean": float(arr.mean()),
+        "std": std,
+        "ci95": [float(np.percentile(arr, 2.5)), float(np.percentile(arr, 97.5))],
+        "min_significant_delta": 2 * std,
+        "note": (
+            "Bootstrap over prediction rows using the registered metric script; "
+            "deltas below ~2 std are indistinguishable from noise."
+        ),
+    }
+
+
 def compute(spec: MetricSpec, y_true, y_pred, proba=None) -> float | None:
     try:
         value = spec.fn(np.asarray(y_true), np.asarray(y_pred), None if proba is None else np.asarray(proba))

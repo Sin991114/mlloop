@@ -44,14 +44,64 @@ def resolve_workspace(workspace: str | None = None) -> Path:
 
 
 def create_server(workspace: str | None = None) -> FastMCP:
-    service = LedgerService(resolve_workspace(workspace))
+    ws = resolve_workspace(workspace)
+    service = LedgerService(ws)
     mcp = FastMCP("mlloop", instructions=INSTRUCTIONS)
+    dashboard = {"attempted": False, "url": None}
+
+    def ensure_dashboard() -> None:
+        """On first tool use, serve the dashboard in-process and pop the user's browser.
+
+        Disable with MLLOOP_NO_DASHBOARD=1 (e.g. headless/CI). Port from
+        MLLOOP_DASHBOARD_PORT (default 8137), scanning upward if taken.
+        """
+        if dashboard["attempted"] or os.environ.get("MLLOOP_NO_DASHBOARD"):
+            dashboard["attempted"] = True
+            return
+        dashboard["attempted"] = True
+        import socket
+        import threading
+        import webbrowser
+
+        base_port = int(os.environ.get("MLLOOP_DASHBOARD_PORT", "8137"))
+        chosen = None
+        for port in range(base_port, base_port + 20):
+            with socket.socket() as probe:
+                try:
+                    probe.bind(("127.0.0.1", port))
+                    chosen = port
+                    break
+                except OSError:
+                    continue
+        if chosen is None:
+            return
+
+        def serve() -> None:
+            import uvicorn
+
+            from .dashboard import create_app
+
+            config = uvicorn.Config(
+                create_app(str(ws)), host="127.0.0.1", port=chosen, log_level="error"
+            )
+            # uvicorn skips signal handlers off the main thread; safe as a daemon.
+            uvicorn.Server(config).run()
+
+        threading.Thread(target=serve, daemon=True, name="mlloop-dashboard").start()
+        dashboard["url"] = f"http://127.0.0.1:{chosen}"
+        try:
+            webbrowser.open(dashboard["url"])
+        except Exception:
+            pass
 
     def call(fn, **kwargs) -> str:
+        ensure_dashboard()
         try:
             result = fn(**kwargs)
         except GateError as exc:
             result = {"ok": False, "refused": True, "error": str(exc)}
+        if isinstance(result, dict) and dashboard["url"]:
+            result.setdefault("dashboard_url", dashboard["url"])
         return json.dumps(result, ensure_ascii=False, indent=2, default=str)
 
     @mcp.tool()
@@ -65,13 +115,18 @@ def create_server(workspace: str | None = None) -> FastMCP:
         monitor_metrics: list[str] | None = None,
         constraints: dict | None = None,
         policy: dict | None = None,
+        metric_script: str | None = None,
     ) -> str:
         """Define and LOCK the project goal. Must be called before any run.
 
         task_type is 'classification' or 'regression'. dataset_path points to a
         csv/tsv/parquet file, fingerprinted at definition time. metric_direction is
         'maximize' or 'minimize'. policy sets the run budget, e.g. {"max_runs": 30}.
-        The primary metric and dataset cannot be changed afterwards.
+        The primary metric and dataset cannot be changed afterwards. For a custom
+        metric (not in the built-in registry) pass metric_script: a python file
+        defining `metric(predictions: DataFrame) -> float` so the noise floor is
+        computed in the metric's real units. The response may include a
+        metric_advisory when the metric choice looks like a known trap.
         """
         return call(
             service.goal_define,
@@ -84,7 +139,20 @@ def create_server(workspace: str | None = None) -> FastMCP:
             monitor_metrics=monitor_metrics,
             constraints=constraints,
             policy=policy,
+            metric_script=metric_script,
         )
+
+    @mcp.tool()
+    def metric_register(script_path: str) -> str:
+        """Attach a custom metric script to the locked goal (the metric NAME never changes;
+        this only teaches MLLoop how to COMPUTE it).
+
+        The script defines `metric(predictions: DataFrame) -> float`; predictions is the
+        run's predictions frame (row_id, y_true, y_pred, proba_*, plus any extra columns
+        your training code shipped, e.g. per-row weights). After registering, re-run
+        diagnose_run(..., refresh=True) so noise floors are recomputed in real units.
+        """
+        return call(service.metric_register, script_path=script_path)
 
     @mcp.tool()
     def status() -> str:

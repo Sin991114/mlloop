@@ -59,18 +59,25 @@ def load_dataset(path: Path | str) -> pd.DataFrame:
     raise ValueError(f"unsupported dataset format '{suffix}' (use csv, tsv, or parquet)")
 
 
-def fingerprint_dataset(path: Path | str) -> dict:
+def fingerprint_dataset(path: Path | str, target_column: str | None = None) -> dict:
     """Fingerprint a csv/tsv/parquet dataset: shape, column dtypes, content hash."""
     path = Path(path)
     df = load_dataset(path)
 
-    return {
+    fingerprint = {
         "path": str(path.resolve()),
         "rows": int(len(df)),
         "columns": {name: str(dtype) for name, dtype in df.dtypes.items()},
         "file_bytes": path.stat().st_size,
         "sha256": _file_sha256(path),
     }
+    if target_column and target_column in df.columns:
+        counts = df[target_column].value_counts()
+        fingerprint["target_distribution"] = {
+            str(k): int(v) for k, v in counts.head(10).items()
+        }
+        fingerprint["target_majority_fraction"] = round(float(counts.iloc[0] / len(df)), 4)
+    return fingerprint
 
 
 def validate_run_artifacts(run_dir: Path | str, task_type: str) -> dict:

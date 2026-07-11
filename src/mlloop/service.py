@@ -199,13 +199,28 @@ class LedgerService:
         monitor_metrics: list[str] | None = None,
         constraints: dict | None = None,
         policy: dict | None = None,
+        metric_script: str | None = None,
     ) -> dict:
+        from .metrics import known_metric, load_metric_script
+
         if task_type not in TASK_TYPES:
             raise GateError(f"task_type must be one of {TASK_TYPES}, got '{task_type}'.")
         if metric_direction not in DIRECTIONS:
             raise GateError(f"metric_direction must be one of {DIRECTIONS}, got '{metric_direction}'.")
         if not (primary_metric or "").strip():
             raise GateError("primary_metric is required (e.g. 'auc', 'rmse').")
+        spec = known_metric(primary_metric)
+        if spec is not None and spec.task != task_type:
+            raise GateError(
+                f"'{primary_metric.strip()}' is a {spec.task} metric but task_type is "
+                f"'{task_type}' — pick a metric that matches the task."
+            )
+        if metric_script:
+            try:
+                load_metric_script(metric_script)
+            except (FileNotFoundError, ValueError) as exc:
+                raise GateError(str(exc)) from exc
+            metric_script = str(Path(metric_script).resolve())
 
         with self.ledger.connect() as con:
             if self._goal(con) is not None:
@@ -215,7 +230,7 @@ class LedgerService:
                     "record a decision_record explaining why and start a fresh workspace."
                 )
             try:
-                fingerprint = fingerprint_dataset(dataset_path)
+                fingerprint = fingerprint_dataset(dataset_path, target_column=target_column)
             except (FileNotFoundError, ValueError) as exc:
                 raise GateError(str(exc)) from exc
             if target_column not in fingerprint["columns"]:
@@ -223,14 +238,30 @@ class LedgerService:
                     f"target_column '{target_column}' not found in dataset. "
                     f"Available columns: {sorted(fingerprint['columns'])}."
                 )
+
+            # Advisory, never a gate: accuracy on imbalanced classes is the classic trap.
+            advisory = None
+            majority = fingerprint.get("target_majority_fraction")
+            if (
+                task_type == "classification"
+                and primary_metric.strip().lower() in ("accuracy", "acc")
+                and majority is not None
+                and majority >= 0.7
+            ):
+                advisory = (
+                    f"the majority class is {majority:.0%} of rows, so a constant prediction "
+                    f"already scores {majority:.2f} accuracy — consider 'auc' (threshold-free "
+                    "ranking) or a cost-weighted metric unless accuracy is externally mandated"
+                )
+
             merged_policy = {**DEFAULT_POLICY, **(policy or {})}
             con.execute(
                 """
                 INSERT INTO goal (
                     id, created_at, task_type, dataset_path, dataset_fingerprint,
                     target_column, primary_metric, metric_direction, target_value,
-                    monitor_metrics, constraints, policy
-                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    monitor_metrics, constraints, policy, metric_script
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     utcnow(),
@@ -244,6 +275,7 @@ class LedgerService:
                     json.dumps(monitor_metrics or []),
                     json.dumps(constraints or {}),
                     json.dumps(merged_policy),
+                    metric_script,
                 ),
             )
             self.ledger.emit(
@@ -262,11 +294,51 @@ class LedgerService:
         return {
             "ok": True,
             "goal": summary,
+            **({"metric_advisory": advisory} if advisory else {}),
             "next": (
                 "Start with the simplest reasonable baseline: run_start(kind='baseline', "
                 "intent='...'). Every run after the baseline requires a registered hypothesis."
             ),
         }
+
+    def metric_register(self, *, script_path: str) -> dict:
+        """Attach (or replace) the custom metric script that teaches MLLoop how to
+        COMPUTE the locked primary metric — the metric name itself never changes."""
+        from .metrics import load_metric_script
+
+        try:
+            load_metric_script(script_path)
+        except (FileNotFoundError, ValueError) as exc:
+            raise GateError(str(exc)) from exc
+        resolved = str(Path(script_path).resolve())
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+            con.execute("UPDATE goal SET metric_script = ? WHERE id = 1", (resolved,))
+            self.ledger.emit(
+                con,
+                "metric_script_registered",
+                {"path": resolved, "primary_metric": goal["primary_metric"]},
+            )
+        return {
+            "ok": True,
+            "metric_script": resolved,
+            "next": (
+                "The noise floor now bootstraps the real primary metric. Re-run "
+                "diagnose_run(run_id=..., refresh=True) on finished runs to recompute "
+                "their floors in the correct units."
+            ),
+        }
+
+    def _metric_fn(self, goal):
+        path = goal["metric_script"]
+        if not path:
+            return None
+        from .metrics import load_metric_script
+
+        try:
+            return load_metric_script(path)
+        except Exception:
+            return None  # diagnostics fall back to the registry with its usual note
 
     # ------------------------------------------------------------------
     # hypotheses
@@ -832,6 +904,7 @@ class LedgerService:
                     run_metrics=json.loads(run["metrics"]) if run["metrics"] else {},
                     out_dir=Path(run["artifact_dir"]) / "diagnostics",
                     feature_context=self._context_map(con),
+                    metric_fn=self._metric_fn(goal),
                 )
             except ValueError as exc:
                 raise GateError(str(exc)) from exc

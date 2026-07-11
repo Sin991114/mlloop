@@ -34,11 +34,16 @@ that loop at the tool layer, not via prompts:
   on it: screens arithmetic combinations and stacked-model features for incremental
   signal with a paired, multiple-testing-adjusted significance bar. The probe generates
   hypotheses; the ledger tests them.
-- **Dashboard** — `mlloop dashboard` serves a local read-only UI: the iteration tree
-  (nodes colored by improvement vs parent, edges labeled with the driving hypothesis),
-  hypothesis board, metric timeline, per-run diagnosis details, and the verdict viewer —
-  built for the morning-after review of an overnight autonomous session. Auto-refreshes
-  while the agent works.
+- **Custom metrics** — a domain metric (AMS, weighted cost, ...) plugs in as a python
+  file defining `metric(predictions) -> float` (`goal_define(metric_script=...)` or
+  `metric_register`); the noise floor is then computed in the metric's real units.
+  `goal_define` also refuses task-mismatched metrics and flags accuracy-on-imbalance
+  with an advisory.
+- **Dashboard** — "The Lab Ledger": lineage tree with hypothesis-labeled edges, metric
+  journey with target line and noise-floor band, a narrated overnight log, evidence
+  rail, and per-run dossiers — built for the morning-after review of an overnight
+  autonomous session. The MCP server auto-opens it in your browser on the first tool
+  call (`MLLOOP_NO_DASHBOARD=1` to disable); `mlloop dashboard` serves it manually.
 
 Status: **Phase 2** — ledger, gates, diagnostics, forensics, reports, and dashboard.
 Full design: [DESIGN.md](DESIGN.md).

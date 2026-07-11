@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from . import viz
-from .metrics import bootstrap_noise_floor, resolve_metric
+from .metrics import bootstrap_noise_floor, bootstrap_noise_floor_custom, resolve_metric
 
 MIN_BUCKET = 10
 
@@ -40,6 +40,7 @@ def run_diagnostics(
     run_metrics: dict,
     out_dir: Path | str,
     feature_context: dict[str, str] | None = None,
+    metric_fn=None,
 ) -> dict:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -68,7 +69,10 @@ def run_diagnostics(
         features, per_row_error, overall_error, error_name, out_dir,
         feature_context=feature_context or {},
     )
-    items["noise_floor"] = _noise_floor(primary_metric, task_type, y_true, y_pred, proba)
+    items["noise_floor"] = _noise_floor(
+        primary_metric, task_type, y_true, y_pred, proba,
+        predictions=predictions, metric_fn=metric_fn,
+    )
     if task_type == "classification":
         items["confusion"] = _confusion(y_true, y_pred, out_dir)
         binary = len(np.unique(y_true)) == 2
@@ -156,7 +160,24 @@ def _error_slices(features, per_row_error, overall, error_name, out_dir, feature
     }
 
 
-def _noise_floor(primary_metric, task_type, y_true, y_pred, proba) -> dict:
+def _noise_floor(primary_metric, task_type, y_true, y_pred, proba, predictions=None, metric_fn=None) -> dict:
+    if metric_fn is not None and predictions is not None:
+        floor = bootstrap_noise_floor_custom(primary_metric, metric_fn, predictions)
+        if floor is None:
+            return {
+                "conclusion": (
+                    f"the registered metric script for '{primary_metric}' failed on too many "
+                    "bootstrap resamples — check that it handles arbitrary row subsets"
+                ),
+                "details": {},
+                "chart": None,
+            }
+        conclusion = (
+            f"{primary_metric} noise floor (registered metric script): std ±{floor['std']:.4f}; "
+            f"treat deltas below ~{floor['min_significant_delta']:.4f} as noise"
+        )
+        return {"conclusion": conclusion, "details": floor, "chart": None}
+
     spec, is_fallback = resolve_metric(primary_metric, task_type)
     if spec.needs_proba and proba is None:
         return {

@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS goal (
     target_value REAL,
     monitor_metrics TEXT NOT NULL DEFAULT '[]',
     constraints TEXT NOT NULL DEFAULT '{}',
-    policy TEXT NOT NULL DEFAULT '{}'
+    policy TEXT NOT NULL DEFAULT '{}',
+    metric_script TEXT
 );
 
 CREATE TABLE IF NOT EXISTS hypotheses (
@@ -123,6 +124,10 @@ class Ledger:
         self.events_path = self.root / "events.jsonl"
         with self.connect() as con:
             con.executescript(SCHEMA)
+            # Lightweight migration for ledgers created before the column existed.
+            goal_columns = [row[1] for row in con.execute("PRAGMA table_info(goal)")]
+            if "metric_script" not in goal_columns:
+                con.execute("ALTER TABLE goal ADD COLUMN metric_script TEXT")
 
     @contextmanager
     def connect(self):
