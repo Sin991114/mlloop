@@ -256,7 +256,7 @@ The user pre-authorizes via the `policy` field of `goal_define`; the server enfo
   HTML reports. Acceptance (**flagship demo**): take a clean public tabular dataset,
   inject 20% label noise; the verdict report must catch it and estimate a rate close to
   20% — this demo goes at the top of the README.
-- **Phase 2 — dashboard**: the five views, read-only over the ledger.
+- **Phase 2 — dashboard** *(done)*: the five views, read-only over the ledger.
 - **Phase 3 — polish & ecosystem**: full overnight policy, opencode/Codex adapter
   verification, PyPI release.
 

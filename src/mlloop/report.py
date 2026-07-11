@@ -73,9 +73,9 @@ ITEM_TITLES = {
 }
 
 
-def render_verdict_report(
-    goal_summary: dict, forensics_results: dict, verdict: dict, charts_dir: Path | str, out_path: Path | str
-) -> Path:
+def verdict_report_html(
+    goal_summary: dict, forensics_results: dict, verdict: dict, charts_dir: Path | str
+) -> str:
     charts_dir = Path(charts_dir)
     parts = ["<h1>Data Verdict Report</h1>", _goal_header(goal_summary)]
     parts.append(
@@ -113,9 +113,16 @@ def render_verdict_report(
         + (" (subsampled)" if forensics_results.get("subsampled") else "")
         + f" · reference scoring: {_esc(forensics_results['scoring'])}</p>"
     )
+    return _page("MLLoop Data Verdict Report", "".join(parts))
+
+
+def render_verdict_report(
+    goal_summary: dict, forensics_results: dict, verdict: dict, charts_dir: Path | str, out_path: Path | str
+) -> Path:
+    html_text = verdict_report_html(goal_summary, forensics_results, verdict, charts_dir)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(_page("MLLoop Data Verdict Report", "".join(parts)), encoding="utf-8")
+    out_path.write_text(html_text, encoding="utf-8")
     return out_path
 
 

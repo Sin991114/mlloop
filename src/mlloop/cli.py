@@ -68,7 +68,10 @@ def main(argv: list[str] | None = None) -> None:
     report = subparsers.add_parser("report", help="generate an HTML report")
     report.add_argument("--kind", choices=["verdict", "experiment"], default="verdict")
     report.add_argument("--output", default=None, help="output path for the HTML file")
-    for sub in (serve, status, init, report):
+    dashboard = subparsers.add_parser("dashboard", help="serve the local read-only dashboard")
+    dashboard.add_argument("--host", default="127.0.0.1")
+    dashboard.add_argument("--port", type=int, default=8137)
+    for sub in (serve, status, init, report, dashboard):
         sub.add_argument(
             "--workspace",
             default=None,
@@ -82,6 +85,13 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "serve":
         create_server(args.workspace).run()
+    elif args.command == "dashboard":
+        import uvicorn
+
+        from .dashboard import create_app
+
+        print(f"MLLoop dashboard: http://{args.host}:{args.port}  (workspace: {workspace})")
+        uvicorn.run(create_app(str(workspace)), host=args.host, port=args.port, log_level="warning")
     elif args.command == "status":
         from .service import LedgerService
 

@@ -25,10 +25,13 @@ that loop at the tool layer, not via prompts:
   `report_generate` renders a stakeholder-readable HTML verdict: is the ceiling set by
   the data or by the modeling? *Demo: inject 20% label noise into a clean dataset — the
   report catches it, quantifies it, and lists the suspect rows.*
-- **Dashboard** *(Phase 2)* — iteration tree, hypothesis board, and metric trajectory for
-  the morning-after review of an overnight autonomous session.
+- **Dashboard** — `mlloop dashboard` serves a local read-only UI: the iteration tree
+  (nodes colored by improvement vs parent, edges labeled with the driving hypothesis),
+  hypothesis board, metric timeline, per-run diagnosis details, and the verdict viewer —
+  built for the morning-after review of an overnight autonomous session. Auto-refreshes
+  while the agent works.
 
-Status: **Phase 1** — ledger, gates, diagnostics, forensics, and reports all working.
+Status: **Phase 2** — ledger, gates, diagnostics, forensics, reports, and dashboard.
 Full design: [DESIGN.md](DESIGN.md).
 Agent setup (Claude Code / opencode / Codex): [docs/integrations.md](docs/integrations.md).
 

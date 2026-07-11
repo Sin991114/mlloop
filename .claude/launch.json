@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-demo",
+      "runtimeExecutable": ".venv/Scripts/mlloop.exe",
+      "runtimeArgs": ["dashboard", "--workspace", "examples/demo", "--port", "8137"],
+      "port": 8137
+    }
+  ]
+}

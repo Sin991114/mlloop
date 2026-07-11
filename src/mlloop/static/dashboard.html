@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MLLoop Dashboard</title>
+<style>
+  :root { --accent:#4C6EF5; --ok:#15803d; --bad:#b91c1c; --flat:#b45309; --muted:#64748b; --line:#e2e8f0; }
+  * { box-sizing: border-box; }
+  body { font-family:-apple-system,'Segoe UI',Roboto,sans-serif; margin:0; background:#f8fafc; color:#1e293b; }
+  header { background:white; border-bottom:1px solid var(--line); padding:0.8rem 1.4rem; display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:1.1rem; margin:0; }
+  .chip { font-size:0.75rem; padding:0.2rem 0.6rem; border-radius:999px; background:#eef2ff; color:#3730a3; font-weight:600; }
+  .chip.warn { background:#fef3c7; color:#92400e; }
+  .meta { color:var(--muted); font-size:0.8rem; }
+  nav { display:flex; gap:0.2rem; padding:0.6rem 1.4rem 0; }
+  nav button { border:1px solid var(--line); border-bottom:none; background:#f1f5f9; padding:0.45rem 1rem;
+               border-radius:8px 8px 0 0; cursor:pointer; font-size:0.85rem; color:var(--muted); }
+  nav button.active { background:white; color:#1e293b; font-weight:600; }
+  main { background:white; border-top:1px solid var(--line); min-height:70vh; padding:1.2rem 1.4rem; display:flex; gap:1.2rem; }
+  #view { flex:1; min-width:0; }
+  #drawer { width:380px; border-left:1px solid var(--line); padding-left:1.2rem; display:none; font-size:0.85rem; }
+  #drawer.open { display:block; }
+  #drawer h3 { margin-top:0; }
+  #drawer img { max-width:100%; border:1px solid var(--line); border-radius:6px; margin:0.4rem 0; }
+  .card { border:1px solid var(--line); border-radius:8px; padding:0.7rem 0.9rem; margin-bottom:0.6rem; background:white; font-size:0.85rem; }
+  .cols { display:flex; gap:0.8rem; align-items:flex-start; }
+  .col { flex:1; background:#f8fafc; border-radius:8px; padding:0.6rem; min-height:100px; }
+  .col h4 { margin:0 0 0.5rem; font-size:0.8rem; color:var(--muted); text-transform:uppercase; }
+  table { border-collapse:collapse; width:100%; font-size:0.82rem; }
+  th,td { border-bottom:1px solid var(--line); padding:0.3rem 0.5rem; text-align:left; }
+  th { color:var(--muted); font-weight:600; }
+  .empty { color:var(--muted); padding:2rem; text-align:center; }
+  svg text { font-family:inherit; }
+  .banner { border-radius:8px; padding:0.6rem 0.9rem; margin-bottom:0.8rem; font-size:0.85rem; }
+  .banner.warn { background:#fef3c7; }
+  .banner.verdict { background:#ffedd5; }
+  a { color:var(--accent); }
+  .conclusion { margin:0.25rem 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MLLoop</h1>
+  <span class="chip" id="state-chip">loading…</span>
+  <span class="meta" id="goal-meta"></span>
+  <span class="meta" id="budget-meta"></span>
+  <span class="meta" id="best-meta"></span>
+</header>
+<nav id="tabs"></nav>
+<main>
+  <div id="view"><div class="empty">Loading…</div></div>
+  <aside id="drawer"></aside>
+</main>
+<script>
+const TABS = ["Tree", "Timeline", "Hypotheses", "Decisions", "Forensics"];
+let state = null, activeTab = "Tree";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = (v) => v == null ? "—" : (typeof v === "number" ? v.toFixed(4).replace(/\.?0+$/, "") : v);
+
+function metricKey() { return state.status.goal ? state.status.goal.primary_metric : null; }
+
+function nodeColor(run, byId) {
+  if (run.status === "running") return "#1d4ed8";
+  if (run.status === "abandoned") return "#cbd5e1";
+  if (run.kind === "baseline" || !run.parent_run_id) return "#64748b";
+  const m = metricKey(), v = run[m], parent = byId[run.parent_run_id];
+  const p = parent ? parent[m] : null;
+  if (v == null || p == null) return "#64748b";
+  const d = state.status.goal.metric_direction === "maximize" ? v - p : p - v;
+  return d > 0 ? "var(--ok)" : (d < 0 ? "var(--bad)" : "var(--flat)");
+}
+
+function renderTree() {
+  const runs = state.runs;
+  if (!runs.length) return '<div class="empty">No runs yet. The agent starts with a baseline.</div>';
+  const byId = {}; runs.forEach(r => byId[r.id] = r);
+  const depth = {};
+  runs.forEach(function walk(r) {
+    if (depth[r.id] != null) return depth[r.id];
+    depth[r.id] = (r.parent_run_id && byId[r.parent_run_id]) ? (walk(byId[r.parent_run_id]) + 1) : 0;
+    return depth[r.id];
+  });
+  const levels = {};
+  runs.forEach(r => { (levels[depth[r.id]] = levels[depth[r.id]] || []).push(r); });
+  const pos = {}, W = 170, H = 92;
+  Object.entries(levels).forEach(([d, list]) =>
+    list.forEach((r, i) => pos[r.id] = { x: i * W + 90, y: d * H + 46 }));
+  const width = Math.max(...Object.values(pos).map(p => p.x)) + 100;
+  const height = Math.max(...Object.values(pos).map(p => p.y)) + 60;
+  let edges = "", nodes = "";
+  runs.forEach(r => {
+    const p = pos[r.id];
+    if (r.parent_run_id && pos[r.parent_run_id]) {
+      const q = pos[r.parent_run_id];
+      edges += `<line x1="${q.x}" y1="${q.y+26}" x2="${p.x}" y2="${p.y-26}" stroke="#cbd5e1" stroke-width="1.5"/>`;
+      if (r.hypothesis_id) edges += `<text x="${(q.x+p.x)/2+6}" y="${(q.y+p.y)/2+4}" font-size="10" fill="#94a3b8">${esc(r.hypothesis_id)}</text>`;
+    }
+    const m = metricKey();
+    nodes += `<g style="cursor:pointer" onclick="openRun('${r.id}')">
+      <rect x="${p.x-70}" y="${p.y-26}" width="140" height="52" rx="9" fill="white" stroke="${nodeColor(r, byId)}" stroke-width="2.5"/>
+      <text x="${p.x}" y="${p.y-6}" text-anchor="middle" font-size="12" font-weight="600">${esc(r.id)} · ${esc(r.kind)}</text>
+      <text x="${p.x}" y="${p.y+12}" text-anchor="middle" font-size="11" fill="#64748b">${m ? esc(m)+" "+fmt(r[m]) : ""}${r.diagnosed ? " ✓" : ""}</text>
+    </g>`;
+  });
+  return `<div style="overflow:auto"><svg width="${width}" height="${height}">${edges}${nodes}</svg></div>
+    <p class="meta">Border color: gray baseline · green improved vs parent · red regressed · amber flat · blue running. ✓ = diagnosed. Edge labels = driving hypothesis. Click a node for details.</p>`;
+}
+
+function renderTimeline() {
+  const m = metricKey();
+  const finished = state.runs.filter(r => r[m] != null);
+  if (finished.length < 2) return '<div class="empty">Need at least two finished runs.</div>';
+  const vals = finished.map(r => r[m]);
+  const lo = Math.min(...vals), hi = Math.max(...vals), pad = (hi - lo) || 1;
+  const W = Math.max(560, finished.length * 90), H = 300;
+  const x = i => 60 + i * (W - 100) / (finished.length - 1);
+  const y = v => 30 + (H - 80) * (1 - (v - lo) / pad);
+  let out = `<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="${finished.map((r,i)=>x(i)+","+y(r[m])).join(" ")}"/>`;
+  finished.forEach((r, i) => {
+    out += `<circle cx="${x(i)}" cy="${y(r[m])}" r="5" fill="var(--accent)" style="cursor:pointer" onclick="openRun('${r.id}')"/>
+      <text x="${x(i)}" y="${H-20}" text-anchor="middle" font-size="11" fill="#64748b">${esc(r.id)}</text>
+      <text x="${x(i)}" y="${y(r[m])-12}" text-anchor="middle" font-size="10">${fmt(r[m])}</text>`;
+  });
+  return `<div style="overflow:auto"><svg width="${W}" height="${H}">${out}</svg></div><p class="meta">${esc(m)} per finished run.</p>`;
+}
+
+function renderHypotheses() {
+  if (!state.hypotheses.length) return '<div class="empty">No hypotheses registered yet.</div>';
+  const groups = { open: [], testing: [], confirmed: [], refuted: [], inconclusive: [] };
+  state.hypotheses.forEach(h => (groups[h.status] = groups[h.status] || []).push(h));
+  return '<div class="cols">' + Object.entries(groups).map(([status, list]) => `
+    <div class="col"><h4>${esc(status)} (${list.length})</h4>` +
+    list.map(h => `<div class="card"><strong>${esc(h.id)}</strong> ${esc(h.statement)}
+      <div class="meta" style="margin-top:0.3rem">predicts: ${esc(h.prediction)}</div>
+      ${h.resolution_narrative ? `<div class="meta">resolution: ${esc(h.resolution_narrative)}</div>` : ""}
+      ${h.evidence_run_ids ? `<div class="meta">evidence: ${h.evidence_run_ids.map(esc).join(", ")}</div>` : ""}
+    </div>`).join("") + "</div>").join("") + "</div>";
+}
+
+function renderDecisions() {
+  if (!state.decisions.length) return '<div class="empty">No decisions recorded yet.</div>';
+  return state.decisions.map(d => `<div class="card"><strong>${esc(d.id)}</strong> ${esc(d.summary)}
+    ${d.next_action ? `<div class="meta">next: ${esc(d.next_action)}</div>` : ""}
+    <div class="meta">${esc(d.created_at)}</div></div>`).join("");
+}
+
+function renderForensics() {
+  let out = "";
+  const stag = state.status.stagnation;
+  if (stag && stag.forensics_recommended)
+    out += `<div class="banner warn"><strong>${stag.consecutive_non_improving_runs} consecutive non-improving runs</strong> — forensics recommended. Ask the agent to call forensics_run.</div>`;
+  if (!state.forensics.length) return out + '<div class="empty">No forensics runs yet.</div>';
+  out += state.forensics.map(f => `<div class="card">
+    <strong>${esc(f.id)}</strong> <span class="chip ${f.verdict.verdict === "model_limited" ? "" : "warn"}">${esc(f.verdict.verdict.replace(/_/g," "))}</span>
+    <span class="meta">confidence: ${esc(f.verdict.confidence)} · ${esc(f.created_at)}${f.quick ? " · quick mode" : ""}</span>
+    <p class="conclusion">${esc(f.verdict.headline)}</p>
+    <a href="/verdict/${esc(f.id)}" target="_blank">Open the full Data Verdict Report →</a>
+  </div>`).join("");
+  return out;
+}
+
+async function openRun(runId) {
+  const res = await fetch("/api/run/" + runId);
+  if (!res.ok) return;
+  const data = await res.json();
+  const r = data.run, m = metricKey();
+  let html = `<h3>${esc(r.id)} <span class="meta">${esc(r.kind)} · ${esc(r.status)}</span></h3>
+    <p>${esc(r.intent)}</p>
+    <table>
+      <tr><th>hypothesis</th><td>${esc(r.hypothesis_id || "—")}</td></tr>
+      <tr><th>parent</th><td>${esc(r.parent_run_id || "—")}</td></tr>
+      <tr><th>metrics</th><td>${r.metrics ? Object.entries(r.metrics).map(([k,v])=>esc(k)+": "+fmt(v)).join("<br>") : "—"}</td></tr>
+      ${r.meta ? `<tr><th>model</th><td>${esc(r.meta.model_desc)}</td></tr><tr><th>seed</th><td>${esc(r.meta.seed)}</td></tr>` : ""}
+      ${r.abandon_reason ? `<tr><th>abandoned</th><td>${esc(r.abandon_reason)}</td></tr>` : ""}
+    </table>`;
+  if (data.diagnosis) {
+    html += "<h3>Diagnosis</h3>" + Object.entries(data.diagnosis.items).map(([k, item]) =>
+      `<p class="conclusion"><strong>${esc(k)}:</strong> ${esc(item.conclusion)}</p>`).join("");
+    html += data.charts.map(c => `<img src="${c}" loading="lazy">`).join("");
+  } else if (r.status === "finished" && r.kind !== "forensics") {
+    html += `<p class="meta">Not diagnosed yet — the agent must call diagnose_run before the next experiment.</p>`;
+  }
+  html += `<p><a href="#" onclick="closeDrawer();return false">close</a></p>`;
+  $("drawer").innerHTML = html;
+  $("drawer").classList.add("open");
+}
+function closeDrawer() { $("drawer").classList.remove("open"); }
+
+function renderTabs() {
+  $("tabs").innerHTML = TABS.map(t =>
+    `<button class="${t === activeTab ? "active" : ""}" onclick="setTab('${t}')">${t}</button>`).join("");
+}
+function setTab(t) { activeTab = t; render(); }
+
+function render() {
+  renderTabs();
+  if (!state) return;
+  const s = state.status;
+  $("state-chip").textContent = s.state;
+  $("state-chip").className = "chip" + (s.state === "DIAGNOSE_PENDING" ? " warn" : "");
+  $("goal-meta").textContent = s.goal
+    ? `${s.goal.task_type} · target: ${s.goal.target_column} · ${s.goal.primary_metric} (${s.goal.metric_direction}) · ${state.workspace}`
+    : "no goal defined yet — the agent must call goal_define";
+  $("budget-meta").textContent = s.budget ? `runs ${s.budget.runs_started}/${s.budget.max_runs}` : "";
+  $("best-meta").textContent = s.best_run ? `best: ${s.best_run.id} = ${fmt(s.best_run[metricKey()])}` : "";
+  const views = { Tree: renderTree, Timeline: renderTimeline, Hypotheses: renderHypotheses,
+                  Decisions: renderDecisions, Forensics: renderForensics };
+  $("view").innerHTML = s.state === "NEED_GOAL"
+    ? '<div class="empty">No goal defined yet. Point your agent at this workspace and ask it to start.</div>'
+    : views[activeTab]();
+}
+
+async function loadState() {
+  try {
+    state = await (await fetch("/api/state")).json();
+    render();
+  } catch (e) { $("state-chip").textContent = "disconnected"; }
+}
+loadState();
+setInterval(loadState, 5000);
+</script>
+</body>
+</html>

@@ -38,3 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Agent integrations: `mlloop init --agent claude|opencode|codex|all` writes/prints
   MCP config for Claude Code, opencode, and Codex CLI (`docs/integrations.md`).
 - CLI: `mlloop report --kind verdict|experiment`.
+
+### Added — Phase 2: dashboard
+- `mlloop dashboard`: local read-only web UI over the ledger (FastAPI + a single
+  self-contained HTML page, no build chain, auto-refreshing every 5 s).
+- Views: iteration tree (nodes colored by improvement vs parent beyond/below the
+  metric direction, edges labeled with driving hypotheses, click-through to run
+  detail), metric timeline, hypothesis board (kanban by status), decision log, and
+  forensics list with verdict chips.
+- Run detail drawer: metrics, model meta, diagnosis conclusions, and all diagnostic
+  charts inline.
+- `/verdict/{id}` renders the full Data Verdict Report directly from the ledger.
+- Runs now carry a `diagnosed` flag in `ledger_query` output.

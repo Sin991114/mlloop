@@ -77,6 +77,8 @@ This project uses the mlloop MCP server for all model training work. Rules:
 Set the budget in `goal_define` (`policy={"max_runs": 40}`) and let the agent run.
 The gates keep it honest while you sleep; in the morning check:
 
-- `mlloop status` — where things stand,
-- `mlloop report --kind experiment` — the full iteration story,
+- `mlloop dashboard` — the live UI: iteration tree, hypothesis board, timeline, verdicts
+  (auto-refreshes, so you can also leave it open overnight and watch),
+- `mlloop status` — where things stand, as JSON,
+- `mlloop report --kind experiment` — the full iteration story as a shareable file,
 - `mlloop report --kind verdict` — if forensics ran, the data-quality evidence.

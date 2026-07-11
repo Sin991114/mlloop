@@ -128,7 +128,9 @@ def _label_noise(model, X, y, cv, prep, has_signal) -> dict:
     from cleanlab.rank import get_label_quality_scores
 
     proba_oof = cross_val_predict(model, X, y, cv=cv, method="predict_proba")
-    issues = find_label_issues(labels=y, pred_probs=proba_oof)
+    # n_jobs=1: cleanlab's multiprocessing uses spawn on Windows, which re-executes
+    # unguarded caller scripts; single-process is safe and fast at our row caps.
+    issues = find_label_issues(labels=y, pred_probs=proba_oof, n_jobs=1)
     noise_rate = float(issues.mean())
     quality = get_label_quality_scores(labels=y, pred_probs=proba_oof)
     classes = prep["classes"]

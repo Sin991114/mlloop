@@ -129,7 +129,7 @@ class LedgerService:
             "policy": json.loads(goal["policy"]),
         }
 
-    def _run_summary(self, goal, row) -> dict:
+    def _run_summary(self, con, goal, row) -> dict:
         return {
             "id": row["id"],
             "kind": row["kind"],
@@ -138,6 +138,7 @@ class LedgerService:
             "hypothesis_id": row["hypothesis_id"],
             "parent_run_id": row["parent_run_id"],
             goal["primary_metric"]: self._primary_value(goal, row["metrics"]),
+            "diagnosed": self._diagnosed(con, row["id"]),
             "created_at": row["created_at"],
             "finished_at": row["finished_at"],
         }
@@ -773,7 +774,7 @@ class LedgerService:
                 )
             elif kind == "experiment":
                 runs = [
-                    self._run_summary(goal, r)
+                    self._run_summary(con, goal, r)
                     for r in con.execute("SELECT * FROM runs ORDER BY rowid").fetchall()
                 ]
                 hypotheses = [
@@ -916,7 +917,7 @@ class LedgerService:
             goal = self._require_goal(con)
             if view == "summary":
                 runs = [
-                    self._run_summary(goal, row)
+                    self._run_summary(con, goal, row)
                     for row in con.execute("SELECT * FROM runs ORDER BY rowid").fetchall()
                 ]
                 hypotheses = [
@@ -938,14 +939,14 @@ class LedgerService:
                 }
             if view == "runs":
                 rows = con.execute("SELECT * FROM runs ORDER BY rowid").fetchall()
-                return {"runs": [self._run_summary(goal, row) for row in rows]}
+                return {"runs": [self._run_summary(con, goal, row) for row in rows]}
             if view == "run":
                 if not run_id:
                     raise GateError("view='run' requires run_id.")
                 row = self._get_run(con, run_id)
                 if row is None:
                     raise GateError(f"Unknown run_id '{run_id}'.")
-                detail = self._run_summary(goal, row)
+                detail = self._run_summary(con, goal, row)
                 detail.update(
                     {
                         "metrics": json.loads(row["metrics"]) if row["metrics"] else None,
