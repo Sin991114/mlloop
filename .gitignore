@@ -8,3 +8,4 @@ build/
 .mlloop/
 .coverage
 examples/demo/
+.claude/
