@@ -116,6 +116,12 @@ Server name: `mlloop`. Tools grouped by responsibility:
 |---|---|
 | `diagnose_run` | run the diagnostics battery (§7) on a Run; returns structured results + chart files |
 | `forensics_run` | run the data forensics battery (§8) |
+| `fe_probe` | price the feature-engineering opportunity: screen arithmetic combos and stacked features for incremental signal (paired, multiple-testing-adjusted); generates hypotheses, never results |
+
+**Domain context (write)**
+| Tool | Responsibility |
+|---|---|
+| `context_register` | record what a feature IS in domain terms (source + details); annotates diagnostics, renders as a data dictionary in reports. The agent is expected to acquire this knowledge from dataset docs, domain MCP servers, skills, or the user |
 
 **Query (read)**
 | Tool | Responsibility |
@@ -300,3 +306,19 @@ The user pre-authorizes via the `policy` field of `goal_define`; the server enfo
   Phase 1, not forced).
 - **Overfit gap**: requires the agent to report `train_<primary_metric>` alongside the
   validation metric in `run_finish`.
+
+**2026-07-11 — Phase 3 additions.** Two capabilities that extend the loop without
+breaking the harness/agent boundary (MLLoop never trains candidate models; probes
+produce evidence, the ledger tests hypotheses):
+
+- **Domain-context ledger** (`context_register`): domain understanding becomes a
+  recorded, incentivized step of the method. Discovery of domain tools (MCP servers,
+  skills) is the agent platform's job; MLLoop stores the semantics and makes
+  diagnostics and reports domain-readable (e.g. wafermap die coordinates → radial
+  features, with the physics recorded as rationale).
+- **FE-opportunity probe** (`fe_probe`): prices feature engineering before runs are
+  spent on it. Candidate features are ranked by model permutation importance rather
+  than marginal mutual information (interaction-only features have zero marginal
+  signal), and gains use paired fold-wise comparison with a 3x-SEM multiple-testing
+  bar. Field-validated on the Telco case: one probe call reproduced the conclusion
+  that had cost two ledger runs.

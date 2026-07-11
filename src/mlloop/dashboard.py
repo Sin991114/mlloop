@@ -115,6 +115,7 @@ def create_app(workspace: str | None = None) -> FastAPI:
         with service.ledger.connect() as con:
             goal = con.execute("SELECT * FROM goal WHERE id = 1").fetchone()
             row = con.execute("SELECT * FROM forensics WHERE id = ?", (forensics_id,)).fetchone()
+            context = service._context_rows(con)
         if goal is None or row is None:
             raise HTTPException(status_code=404, detail="unknown forensics id")
         return verdict_report_html(
@@ -122,6 +123,7 @@ def create_app(workspace: str | None = None) -> FastAPI:
             json.loads(row["results"]),
             json.loads(row["verdict"]),
             service.ledger.root / "forensics" / forensics_id,
+            context=context,
         )
 
     return app

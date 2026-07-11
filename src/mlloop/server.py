@@ -21,12 +21,17 @@ MLLoop is a scientific-method harness for ML experimentation. Enforced workflow:
 2. run_start(kind='baseline') — the first run must be a simple baseline.
 3. diagnose_run — every finished run must be diagnosed before the next experiment;
    study the failure modes (error slices, noise floor, calibration, confusion).
-4. hypothesis_register — a falsifiable explanation of what limits performance,
+4. Understand the data, not just the metrics: consult dataset docs, domain MCP servers,
+   skills, or the user about what the columns MEAN, and record it with context_register —
+   error slices and reports become domain-readable. Before investing runs in feature
+   engineering, run fe_probe to price the opportunity.
+5. hypothesis_register — a falsifiable explanation of what limits performance,
    derived from the diagnosis.
-5. run_start(hypothesis_id=...) — experiments without a registered hypothesis are refused.
-6. Each run must write predictions.parquet + meta.json into its artifact_dir before run_finish.
-7. hypothesis_resolve with evidence runs; decision_record each iteration's conclusion.
-8. When runs stagnate (status reports forensics_recommended) or you suspect the data itself:
+6. run_start(hypothesis_id=...) — experiments without a registered hypothesis are refused.
+7. Each run must write the full artifact contract into its artifact_dir before run_finish
+   (train.*, infer.*, model.*, predictions.parquet, meta.json).
+8. hypothesis_resolve with evidence runs; decision_record each iteration's conclusion.
+9. When runs stagnate (status reports forensics_recommended) or you suspect the data itself:
    forensics_run interrogates the dataset (label noise, signal check, conflict rate,
    learning curve), then report_generate(kind='verdict') produces the stakeholder report.
 Call status anytime for the current state and allowed actions; ledger_query to recover
@@ -178,6 +183,36 @@ def create_server(workspace: str | None = None) -> FastMCP:
         return call(
             service.decision_record, summary=summary, evidence=evidence, next_action=next_action
         )
+
+    @mcp.tool()
+    def context_register(
+        feature: str, meaning: str, source: str | None = None, details: dict | None = None
+    ) -> str:
+        """Record domain semantics for a feature: what the column IS in domain terms.
+
+        Use whenever you learn what a column means — from dataset docs, domain MCP
+        servers, skills, or the user (e.g. 'die_x: horizontal die position on the
+        wafer; edge dies have higher defect rates'). Registered semantics annotate
+        error slices in diagnostics and appear as a data dictionary in reports.
+        source: where the knowledge came from. details: units, generation process,
+        known effects. Engineered-feature names are allowed.
+        """
+        return call(
+            service.context_register, feature=feature, meaning=meaning, source=source, details=details
+        )
+
+    @mcp.tool()
+    def fe_probe(top_k: int = 5, quick: bool = False) -> str:
+        """Price the feature-engineering opportunity BEFORE spending runs on it.
+
+        Screens arithmetic combinations (difference/ratio/product of the top numeric
+        features) and stacked-model features (isolation-forest score, out-of-fold kNN
+        prediction) for incremental cross-validated signal, with a multiple-testing
+        adjusted significance bar. Verdict fe_worth_testing -> register a hypothesis
+        for the named candidate and confirm with a run; fe_unlikely_to_help -> spend
+        the budget elsewhere. The probe generates hypotheses, never results.
+        """
+        return call(service.fe_probe, top_k=top_k, quick=quick)
 
     @mcp.tool()
     def diagnose_run(run_id: str, refresh: bool = False) -> str:

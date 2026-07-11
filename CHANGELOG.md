@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   class. Requires `shap` (now a dependency).
 - `diagnose_run(refresh=True)` recomputes a stored diagnosis with the current
   battery.
+- `context_register`: a domain-semantics ledger — record what each feature IS in
+  domain terms (source and details included). Registered meanings annotate error
+  slices in diagnostics, render as a data dictionary in both reports, and `status`
+  nudges the agent to acquire domain context when coverage is zero.
+- `fe_probe`: prices the feature-engineering opportunity before spending runs —
+  screens difference/ratio/product combinations of the top numeric features
+  (ranked by model permutation importance, so interaction-only features are not
+  missed) plus stacked-model features (isolation-forest score, out-of-fold kNN),
+  using paired fold-wise gains with a 3x-SEM multiple-testing bar. Verdicts:
+  `fe_worth_testing` (with named candidates) or `fe_unlikely_to_help`.
 - Reproducibility deliverables in the artifact contract: every run must now ship
   `train.*` (self-contained seeded training script), `infer.*` (scores unseen data
   from the shipped model), and `model.*` (the serialized model). `run_finish`

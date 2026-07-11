@@ -27,6 +27,13 @@ that loop at the tool layer, not via prompts:
   `report_generate` renders a stakeholder-readable HTML verdict: is the ceiling set by
   the data or by the modeling? *Demo: inject 20% label noise into a clean dataset — the
   report catches it, quantifies it, and lists the suspect rows.*
+- **Domain context** — `context_register` records what columns MEAN in domain terms
+  (learned from dataset docs, domain MCP servers/skills, or the user); error slices and
+  reports become domain-readable, and every report ships a data dictionary.
+- **FE-opportunity probe** — `fe_probe` prices feature engineering before you spend runs
+  on it: screens arithmetic combinations and stacked-model features for incremental
+  signal with a paired, multiple-testing-adjusted significance bar. The probe generates
+  hypotheses; the ledger tests them.
 - **Dashboard** — `mlloop dashboard` serves a local read-only UI: the iteration tree
   (nodes colored by improvement vs parent, edges labeled with the driving hypothesis),
   hypothesis board, metric timeline, per-run diagnosis details, and the verdict viewer —

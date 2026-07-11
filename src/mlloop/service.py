@@ -675,6 +675,121 @@ class LedgerService:
         return {"ok": True, "decision_id": decision_id}
 
     # ------------------------------------------------------------------
+    # domain context (Phase 3)
+    # ------------------------------------------------------------------
+
+    def _context_map(self, con: sqlite3.Connection) -> dict[str, str]:
+        rows = con.execute("SELECT feature, meaning FROM feature_context").fetchall()
+        return {row["feature"]: row["meaning"] for row in rows}
+
+    def _context_rows(self, con: sqlite3.Connection) -> list[dict]:
+        rows = con.execute("SELECT * FROM feature_context ORDER BY feature").fetchall()
+        return [
+            {
+                "feature": row["feature"],
+                "meaning": row["meaning"],
+                "source": row["source"],
+                "details": json.loads(row["details"]) if row["details"] else None,
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def context_register(
+        self,
+        *,
+        feature: str,
+        meaning: str,
+        source: str | None = None,
+        details: dict | None = None,
+    ) -> dict:
+        if not (feature or "").strip() or not (meaning or "").strip():
+            raise GateError(
+                "feature and meaning are required — record what the column IS in domain "
+                "terms (units, generation process, known effects go in details)."
+            )
+        feature = feature.strip()
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+            columns = json.loads(goal["dataset_fingerprint"])["columns"]
+            note = (
+                None
+                if feature in columns
+                else "not a raw dataset column — recorded as engineered-feature context"
+            )
+            now = utcnow()
+            con.execute(
+                """
+                INSERT INTO feature_context (feature, created_at, updated_at, meaning, source, details)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(feature) DO UPDATE SET
+                    updated_at = excluded.updated_at, meaning = excluded.meaning,
+                    source = excluded.source, details = excluded.details
+                """,
+                (
+                    feature,
+                    now,
+                    now,
+                    meaning.strip(),
+                    source,
+                    json.dumps(details, ensure_ascii=False) if details else None,
+                ),
+            )
+            self.ledger.emit(
+                con, "context_registered", {"feature": feature, "meaning": meaning.strip(), "source": source}
+            )
+            registered = con.execute("SELECT COUNT(*) FROM feature_context").fetchone()[0]
+        return {
+            "ok": True,
+            "feature": feature,
+            "registered_features": registered,
+            "note": note,
+            "next": (
+                "Semantics now annotate error slices and appear as a data dictionary in "
+                "reports. Register more as you learn the domain."
+            ),
+        }
+
+    def fe_probe(self, *, top_k: int = 5, quick: bool = False) -> dict:
+        from .artifacts import load_dataset
+        from .fe_probe import run_fe_probe
+
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+            probe_id = self.ledger.next_id(con, "fe_probes", "P")
+        try:
+            df = load_dataset(goal["dataset_path"])
+        except (FileNotFoundError, ValueError) as exc:
+            raise GateError(f"cannot load the goal dataset: {exc}") from exc
+        results = run_fe_probe(
+            df=df,
+            target_column=goal["target_column"],
+            task_type=goal["task_type"],
+            top_k=top_k,
+            quick=quick,
+        )
+        with self.ledger.connect() as con:
+            con.execute(
+                "INSERT INTO fe_probes (id, created_at, results) VALUES (?, ?, ?)",
+                (probe_id, utcnow(), json.dumps(results, ensure_ascii=False)),
+            )
+            self.ledger.emit(
+                con,
+                "fe_probe_completed",
+                {"id": probe_id, "verdict": results["verdict"], "conclusion": results["conclusion"]},
+            )
+        return {
+            "ok": True,
+            "probe_id": probe_id,
+            **results,
+            "next": (
+                "If the verdict is fe_worth_testing: hypothesis_register the specific candidate "
+                "and confirm with a run. If not: spend the budget elsewhere — the probe just "
+                "saved you the experiments."
+            ),
+        }
+
+    # ------------------------------------------------------------------
     # diagnostics & forensics (Phase 1)
     # ------------------------------------------------------------------
 
@@ -716,6 +831,7 @@ class LedgerService:
                     predictions=predictions,
                     run_metrics=json.loads(run["metrics"]) if run["metrics"] else {},
                     out_dir=Path(run["artifact_dir"]) / "diagnostics",
+                    feature_context=self._context_map(con),
                 )
             except ValueError as exc:
                 raise GateError(str(exc)) from exc
@@ -800,6 +916,7 @@ class LedgerService:
                     json.loads(row["verdict"]),
                     self.ledger.root / "forensics" / row["id"],
                     out,
+                    context=self._context_rows(con),
                 )
             elif kind == "experiment":
                 runs = [
@@ -817,7 +934,10 @@ class LedgerService:
                 best = self._best_run(con, goal)
                 best_run = {"id": best[0], goal["primary_metric"]: best[1]} if best else None
                 out = Path(output_path) if output_path else self.ledger.root / "reports" / "experiment.html"
-                path = render_experiment_report(goal_summary, runs, hypotheses, decisions, best_run, out)
+                path = render_experiment_report(
+                    goal_summary, runs, hypotheses, decisions, best_run, out,
+                    context=self._context_rows(con),
+                )
             else:
                 raise GateError(f"Unknown report kind '{kind}'. Kinds: verdict, experiment.")
             self.ledger.emit(con, "report_generated", {"kind": kind, "path": str(path)})
@@ -875,6 +995,8 @@ class LedgerService:
                 "SELECT id, verdict FROM forensics ORDER BY rowid DESC LIMIT 1"
             ).fetchone()
 
+            registered_context = con.execute("SELECT COUNT(*) FROM feature_context").fetchone()[0]
+            dataset_columns = len(json.loads(goal["dataset_fingerprint"])["columns"]) - 1
             base = {
                 "goal": self._goal_summary(goal),
                 "budget": {
@@ -884,6 +1006,10 @@ class LedgerService:
                 },
                 "best_run": {"id": best[0], goal["primary_metric"]: best[1]} if best else None,
                 "hypotheses": hypothesis_counts,
+                "feature_context": {
+                    "registered": registered_context,
+                    "dataset_features": dataset_columns,
+                },
                 "stagnation": {
                     "consecutive_non_improving_runs": streak,
                     "forensics_recommended": streak >= forensics_after and latest_forensics is None,
@@ -898,6 +1024,13 @@ class LedgerService:
                     else None
                 ),
             }
+            if registered_context == 0:
+                base["context_hint"] = (
+                    "No feature semantics registered yet. Understanding the data is part of "
+                    "the method: consult dataset docs, domain MCP servers/skills, or the "
+                    "user, then record what each column IS with context_register — "
+                    "diagnostics and reports become domain-readable."
+                )
             if running is not None:
                 return {
                     "state": "RUN_IN_PROGRESS",
@@ -1018,7 +1151,17 @@ class LedgerService:
                 ]
                 latest = json.loads(rows[-1]["results"]) if rows else None
                 return {"forensics": entries, "latest_results": latest}
+            if view == "context":
+                return {"feature_context": self._context_rows(con)}
+            if view == "fe_probes":
+                rows = con.execute("SELECT * FROM fe_probes ORDER BY rowid").fetchall()
+                return {
+                    "fe_probes": [
+                        {"id": row["id"], "created_at": row["created_at"], **json.loads(row["results"])}
+                        for row in rows
+                    ]
+                }
             raise GateError(
                 f"Unknown view '{view}'. Views: summary, runs, run, hypotheses, decisions, "
-                "events, diagnosis, forensics."
+                "events, diagnosis, forensics, context, fe_probes."
             )

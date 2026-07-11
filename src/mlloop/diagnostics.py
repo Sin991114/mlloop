@@ -39,6 +39,7 @@ def run_diagnostics(
     predictions: pd.DataFrame,
     run_metrics: dict,
     out_dir: Path | str,
+    feature_context: dict[str, str] | None = None,
 ) -> dict:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -63,7 +64,10 @@ def run_diagnostics(
     overall_error = float(per_row_error.mean())
 
     items: dict[str, dict] = {}
-    items["error_slices"] = _error_slices(features, per_row_error, overall_error, error_name, out_dir)
+    items["error_slices"] = _error_slices(
+        features, per_row_error, overall_error, error_name, out_dir,
+        feature_context=feature_context or {},
+    )
     items["noise_floor"] = _noise_floor(primary_metric, task_type, y_true, y_pred, proba)
     if task_type == "classification":
         items["confusion"] = _confusion(y_true, y_pred, out_dir)
@@ -90,7 +94,8 @@ def run_diagnostics(
     return {"overall_error": overall_error, "error_name": error_name, "items": items}
 
 
-def _error_slices(features, per_row_error, overall, error_name, out_dir) -> dict:
+def _error_slices(features, per_row_error, overall, error_name, out_dir, feature_context=None) -> dict:
+    feature_context = feature_context or {}
     n = len(per_row_error)
     min_bucket = max(MIN_BUCKET, int(0.02 * n))
     err = pd.Series(per_row_error)
@@ -111,15 +116,16 @@ def _error_slices(features, per_row_error, overall, error_name, out_dir) -> dict
                 continue
             rate = float(group.mean())
             if overall > 0 and rate > overall:
-                slices.append(
-                    {
-                        "feature": col,
-                        "bucket": str(bucket),
-                        "n": int(len(group)),
-                        "error": round(rate, 4),
-                        "lift": round(rate / overall, 2),
-                    }
-                )
+                entry = {
+                    "feature": col,
+                    "bucket": str(bucket),
+                    "n": int(len(group)),
+                    "error": round(rate, 4),
+                    "lift": round(rate / overall, 2),
+                }
+                if col in feature_context:
+                    entry["meaning"] = feature_context[col]
+                slices.append(entry)
     slices.sort(key=lambda s: s["lift"], reverse=True)
     slices = slices[:8]
 
