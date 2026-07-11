@@ -103,8 +103,13 @@ class LedgerService:
         return None if value is None else float(value)
 
     def _best_run(self, con: sqlite3.Connection, goal) -> tuple[str, float] | None:
+        # Forensics probes are excluded: their metrics come from deliberately
+        # different (possibly contaminated) evaluation protocols.
         best: tuple[str, float] | None = None
-        rows = con.execute("SELECT id, metrics FROM runs WHERE status = 'finished' ORDER BY rowid")
+        rows = con.execute(
+            "SELECT id, metrics FROM runs WHERE status = 'finished' "
+            "AND kind IN ('baseline', 'experiment') ORDER BY rowid"
+        )
         for row in rows.fetchall():
             value = self._primary_value(goal, row["metrics"])
             if value is None:

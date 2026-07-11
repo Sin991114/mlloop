@@ -158,3 +158,11 @@ def test_stagnation_triggers_forensics_recommendation(svc_ready, make_artifacts)
     status = svc.status()
     assert status["stagnation"]["consecutive_non_improving_runs"] == 3
     assert status["stagnation"]["forensics_recommended"] is True
+
+
+def test_forensics_runs_excluded_from_best(svc_ready, make_artifacts):
+    run = svc_ready.run_start(intent="leaky protocol probe", kind="forensics")
+    make_artifacts(run["artifact_dir"], seed=9)
+    svc_ready.run_finish(run_id=run["run_id"], metrics={"auc": 0.99})
+    best = svc_ready.status()["best_run"]
+    assert best["id"] == "R1", "a forensics probe must never be crowned best run"
