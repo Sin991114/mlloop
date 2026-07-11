@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mlloop"
-version = "0.0.2"
+version = "0.0.3"
 description = "A scientific-method harness for AI-driven ML training: experiment ledger, hypothesis gates, diagnostics, and data-verdict reports over MCP."
 readme = "README.md"
 requires-python = ">=3.11"
