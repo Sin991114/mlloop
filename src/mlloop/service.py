@@ -234,6 +234,28 @@ class LedgerService:
                 raise GateError(str(exc)) from exc
             metric_script = str(Path(metric_script).resolve())
 
+        # Hardware consent gate: a detected GPU belongs to the user, not the agent.
+        import os
+
+        from .hardware import detect_gpus
+
+        policy = dict(policy or {})
+        gpus = detect_gpus()
+        if gpus and "use_gpu" not in policy:
+            default = os.environ.get("MLLOOP_GPU_DEFAULT", "").lower()
+            if default in ("allow", "deny"):
+                policy["use_gpu"] = default == "allow"
+            else:
+                names = "; ".join(f"{g['name']} ({g['memory']})" for g in gpus)
+                raise GateError(
+                    f"GPU detected on this machine: {names}. Whether training may use it is "
+                    "the USER's decision (cost, thermals, shared hardware) — ask them, then "
+                    're-call goal_define with policy={"use_gpu": true} or '
+                    '{"use_gpu": false}. Headless override: MLLOOP_GPU_DEFAULT=allow|deny.'
+                )
+        if gpus:
+            policy["detected_gpus"] = [g["name"] for g in gpus]
+
         with self.ledger.connect() as con:
             if self._goal(con) is not None:
                 raise GateError(
@@ -307,6 +329,11 @@ class LedgerService:
             "ok": True,
             "goal": summary,
             **({"metric_advisory": advisory} if advisory else {}),
+            **(
+                {"hardware": {"gpus": gpus, "use_gpu": policy.get("use_gpu")}}
+                if gpus
+                else {}
+            ),
             "next": (
                 "Start with the simplest reasonable baseline: run_start(kind='baseline', "
                 "intent='...'). Every run after the baseline requires a registered hypothesis."

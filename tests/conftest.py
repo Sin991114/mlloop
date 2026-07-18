@@ -7,6 +7,12 @@ import pytest
 from mlloop.service import LedgerService
 
 
+@pytest.fixture(autouse=True)
+def _no_gpu_by_default(monkeypatch):
+    """Tests must behave identically on GPU and non-GPU machines."""
+    monkeypatch.setattr("mlloop.hardware.detect_gpus", lambda *a, **k: [])
+
+
 @pytest.fixture
 def workspace(tmp_path):
     return tmp_path

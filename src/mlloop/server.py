@@ -17,7 +17,10 @@ from .service import GateError, LedgerService
 
 INSTRUCTIONS = """\
 MLLoop is a scientific-method harness for ML experimentation. Enforced workflow:
-1. goal_define — locks dataset, target column and primary metric. Required before anything else.
+1. goal_define — locks dataset, target column and primary metric. Required before anything
+   else. If a GPU is detected, goal_define refuses until you have ASKED THE USER whether
+   training may use it and passed policy={"use_gpu": true/false}; honor that decision in
+   every training script.
 2. run_start(kind='baseline') — the first run must be a simple baseline.
 3. diagnose_run — every finished run must be diagnosed before the next experiment;
    study the failure modes (error slices, noise floor, calibration, confusion).

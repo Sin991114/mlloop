@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- GPU consent gate: goal_define detects GPUs (via nvidia-smi) and refuses until
+  the agent has asked the USER whether training may use them, recording the
+  decision in policy ({"use_gpu": true/false}) alongside the detected hardware.
+  Headless override: MLLOOP_GPU_DEFAULT=allow|deny. The GPU belongs to the
+  user, not the agent.
+- target_update: move the goal's target value on the record (metric and dataset
+  stay locked forever); stop_conditions track the new target immediately.
+
 ## [0.0.4] - 2026-07-11
 
 Exploration-discipline release, shaped by a competitive study of AIDE (tree
