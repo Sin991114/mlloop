@@ -270,6 +270,17 @@ def create_server(workspace: str | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    def compare_runs(run_a: str, run_b: str) -> str:
+        """Paired comparison of two finished runs on their shared held-out rows.
+
+        Shared-row pairing cancels the common variance, so far smaller deltas are
+        resolvable than the single-run noise floor suggests. Use before resolving a
+        hypothesis when the raw delta looks small — 'indistinguishable' and 'small but
+        real' are different verdicts.
+        """
+        return call(service.compare_runs, run_a=run_a, run_b=run_b)
+
+    @mcp.tool()
     def ensemble_probe(run_ids: list[str] | None = None) -> str:
         """Price ensembling with ZERO training: average the stored held-out predictions of
         finished runs on their shared rows and score against the best single run — paired,

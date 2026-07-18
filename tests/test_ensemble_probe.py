@@ -87,3 +87,56 @@ def test_ensemble_probe_input_validation(svc_ready):
         svc_ready.ensemble_probe(run_ids=["R99", "R1"])
     with pytest.raises(GateError, match="at least two"):
         svc_ready.ensemble_probe()  # only one finished run exists
+
+
+def test_compare_runs_paired_significance(svc_with_goal, make_artifacts):
+    svc = svc_with_goal
+    rng = np.random.default_rng(1)
+    n = 100
+    y = np.array([i % 2 for i in range(n)])
+    base_noise = rng.normal(0, 0.3, n)
+    proba_weak = np.clip(0.5 + (y - 0.5) * 0.3 + base_noise, 0, 1)
+    proba_strong = np.clip(0.5 + (y - 0.5) * 0.7 + base_noise, 0, 1)  # shared noise, more signal
+    proba_twin = np.clip(proba_strong + rng.normal(0, 0.01, n), 0, 1)  # nearly identical to strong
+
+    r1 = _finish_run_with_predictions(svc, make_artifacts, "weak", proba_weak, y)
+    h1 = _register(svc)
+    r2 = _finish_run_with_predictions(svc, make_artifacts, "strong", proba_strong, y, hypothesis_id=h1)
+    h2 = _register(svc)
+    r3 = _finish_run_with_predictions(svc, make_artifacts, "twin", proba_twin, y, hypothesis_id=h2)
+
+    clear = svc.compare_runs(run_a=r1, run_b=r2)
+    assert clear["ok"] and clear["significant"] is True
+    assert clear["improvement_b_over_a"] > 0
+
+    twins = svc.compare_runs(run_a=r2, run_b=r3)
+    assert twins["ok"] and twins["significant"] is False
+    assert "indistinguishable" in twins["conclusion"]
+
+
+def test_run_finish_carries_paired_comparison(svc_with_goal, make_artifacts):
+    svc = svc_with_goal
+    rng = np.random.default_rng(3)
+    n = 100
+    y = np.array([i % 2 for i in range(n)])
+    proba_a = np.clip(0.5 + (y - 0.5) * 0.4 + rng.normal(0, 0.2, n), 0, 1)
+    proba_b = np.clip(0.5 + (y - 0.5) * 0.8 + rng.normal(0, 0.2, n), 0, 1)
+
+    _finish_run_with_predictions(svc, make_artifacts, "baseline", proba_a, y)
+    h = _register(svc)
+    run = svc.run_start(intent="better model", hypothesis_id=h)
+    d = make_artifacts(run["artifact_dir"], n=n)
+    pd.DataFrame({"row_id": np.arange(n), "y_true": y,
+                  "y_pred": (proba_b >= 0.5).astype(int), "proba_1": proba_b}
+                 ).to_parquet(f"{d}/predictions.parquet", index=False)
+    from sklearn.metrics import roc_auc_score
+
+    out = svc.run_finish(run_id=run["run_id"], metrics={"auc": round(float(roc_auc_score(y, proba_b)), 4)})
+    paired = out["comparison"]["vs_parent"]["paired"]
+    assert paired is not None
+    assert "significance_bar" in paired and paired["significance_bar"] > 0
+
+
+def test_compare_runs_validation(svc_ready):
+    with pytest.raises(GateError, match="Unknown run_id"):
+        svc_ready.compare_runs(run_a="R1", run_b="R99")

@@ -54,8 +54,10 @@ ARTIFACT_CONTRACT = {
 }
 
 COMPARISON_NOTE = (
-    "Raw deltas — seed-variance significance testing arrives with diagnose_run "
-    "(Phase 1); treat small deltas as noise, not progress."
+    "Deltas come with a paired significance bar when both runs share held-out rows "
+    "(shared variance cancels, so much smaller deltas are resolvable than the "
+    "single-run noise floor suggests); without shared rows, treat deltas below the "
+    "noise floor as noise, not progress."
 )
 
 
@@ -692,17 +694,50 @@ class LedgerService:
                     "value": parent_value,
                     "delta": delta,
                     "improved": _improved(delta, direction),
+                    "paired": self._paired_entry(goal, run, parent),
                 }
         best = self._best_run(con, goal)
         if best is not None:
             delta = value - best[1]
+            best_row = self._get_run(con, best[0])
             out["vs_best"] = {
                 "run_id": best[0],
                 "value": best[1],
                 "delta": delta,
                 "improved": _improved(delta, direction),
+                "paired": self._paired_entry(goal, run, best_row),
             }
         return out
+
+    def _paired_entry(self, goal, run, other_row) -> dict | None:
+        """Paired significance of this run vs another when they share held-out rows."""
+        if other_row is None:
+            return None
+        from .metrics import paired_bootstrap_std
+
+        frame = self._load_predictions(run)
+        other = self._load_predictions(other_row)
+        if frame is None or other is None:
+            return None
+        aligned = self._aligned_frames(other, frame)
+        if aligned is None:
+            return None
+        other_aligned, frame_aligned = aligned
+        try:
+            scorer, _, _ = self._metric_compute(goal)
+            sign = 1.0 if goal["metric_direction"] == "maximize" else -1.0
+            improvement = sign * (float(scorer(frame_aligned)) - float(scorer(other_aligned)))
+            std = paired_bootstrap_std(scorer, other_aligned, frame_aligned, n_boot=100)
+        except Exception:
+            return None
+        if std is None:
+            return None
+        bar = max(2 * std, 1e-6)
+        return {
+            "improvement": round(improvement, 4),
+            "significance_bar": round(bar, 4),
+            "significant": bool(abs(improvement) > bar),
+        }
 
     def run_abandon(self, *, run_id: str, reason: str) -> dict:
         if not (reason or "").strip():
@@ -860,6 +895,90 @@ class LedgerService:
                 "saved you the experiments."
             ),
         }
+
+    def _load_predictions(self, run_row):
+        import pandas as pd
+
+        path = Path(run_row["artifact_dir"]) / "predictions.parquet"
+        return pd.read_parquet(path) if path.exists() else None
+
+    def _aligned_frames(self, frame_a, frame_b):
+        """Row-align two prediction frames on their shared row_ids (None if too few)."""
+        common = sorted(set(frame_a["row_id"]) & set(frame_b["row_id"]))
+        smallest = min(len(frame_a), len(frame_b))
+        if len(common) < max(50, int(0.6 * smallest)):
+            return None
+        return (
+            frame_a.set_index("row_id").loc[common].reset_index(),
+            frame_b.set_index("row_id").loc[common].reset_index(),
+        )
+
+    def compare_runs(self, *, run_a: str, run_b: str) -> dict:
+        from .metrics import paired_bootstrap_std
+
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+            rows = {}
+            for run_id in (run_a, run_b):
+                run = self._get_run(con, run_id)
+                if run is None:
+                    raise GateError(f"Unknown run_id '{run_id}'.")
+                if run["status"] != "finished":
+                    raise GateError(f"Run {run_id} is {run['status']} — compare finished runs.")
+                if run["kind"] == "forensics":
+                    raise GateError(
+                        f"Run {run_id} is a forensics probe (different evaluation protocol)."
+                    )
+                rows[run_id] = run
+        frame_a = self._load_predictions(rows[run_a])
+        frame_b = self._load_predictions(rows[run_b])
+        if frame_a is None or frame_b is None:
+            raise GateError("Both runs need stored predictions.parquet to be compared.")
+        aligned = self._aligned_frames(frame_a, frame_b)
+        if aligned is None:
+            return {
+                "ok": False,
+                "error": (
+                    "the runs share too few held-out rows for a paired comparison — "
+                    "compare runs that used the same split, or ship cv_predictions."
+                ),
+            }
+        frame_a, frame_b = aligned
+        scorer, metric_name, fallback = self._metric_compute(goal)
+        value_a = float(scorer(frame_a))
+        value_b = float(scorer(frame_b))
+        sign = 1.0 if goal["metric_direction"] == "maximize" else -1.0
+        improvement = sign * (value_b - value_a)
+        std = paired_bootstrap_std(scorer, frame_a, frame_b, n_boot=150)
+        bar = None if std is None else max(2 * std, 1e-6)
+        significant = bool(bar is not None and abs(improvement) > bar)
+        verdict = (
+            f"{run_b} is significantly {'better' if improvement > 0 else 'worse'} than {run_a}"
+            if significant
+            else f"{run_b} and {run_a} are statistically indistinguishable on shared rows"
+        )
+        result = {
+            "ok": True,
+            "metric": metric_name,
+            "n_common_rows": len(frame_a),
+            run_a: round(value_a, 4),
+            run_b: round(value_b, 4),
+            "improvement_b_over_a": round(improvement, 4),
+            "paired_std": None if std is None else round(std, 4),
+            "significance_bar": None if bar is None else round(bar, 4),
+            "significant": significant,
+            "conclusion": (
+                f"{verdict}: {metric_name} {value_b:.4f} vs {value_a:.4f} "
+                f"({improvement:+.4f} vs paired 2-sigma bar "
+                f"{'n/a' if bar is None else format(bar, '.4f')}) on {len(frame_a)} shared rows"
+            ),
+        }
+        if fallback:
+            result["metric_note"] = (
+                f"primary metric '{goal['primary_metric']}' has no registered computation; "
+                f"compared with '{metric_name}'"
+            )
+        return result
 
     def _metric_compute(self, goal):
         """Return (scorer(frame) -> float, scored_metric_name, is_fallback)."""

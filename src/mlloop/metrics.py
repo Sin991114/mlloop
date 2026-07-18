@@ -95,6 +95,31 @@ def load_metric_script(path):
     return fn
 
 
+def paired_bootstrap_std(scorer, frame_a, frame_b, n_boot: int = 100, seed: int = 0) -> float | None:
+    """Std of scorer(b) - scorer(a) over row-aligned bootstrap resamples.
+
+    Because both frames are resampled with identical row indices, shared
+    variance cancels — believable deltas are far smaller than the single-run
+    noise floor suggests.
+    """
+    rng = np.random.default_rng(seed)
+    n = len(frame_a)
+    deltas = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        try:
+            delta = float(scorer(frame_b.iloc[idx].reset_index(drop=True))) - float(
+                scorer(frame_a.iloc[idx].reset_index(drop=True))
+            )
+        except Exception:
+            continue
+        if np.isfinite(delta):
+            deltas.append(delta)
+    if len(deltas) < max(20, n_boot // 4):
+        return None
+    return float(np.std(deltas, ddof=1))
+
+
 def bootstrap_noise_floor_custom(
     name: str, fn, predictions, n_boot: int = 200, seed: int = 0
 ) -> dict | None:
