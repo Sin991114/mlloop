@@ -24,7 +24,10 @@ MLLoop is a scientific-method harness for ML experimentation. Enforced workflow:
 4. Understand the data, not just the metrics: consult dataset docs, domain MCP servers,
    skills, or the user about what the columns MEAN, and record it with context_register —
    error slices and reports become domain-readable. Before investing runs in feature
-   engineering, run fe_probe to price the opportunity.
+   engineering, run fe_probe to price the opportunity. Also retrieve modeling precedent
+   before the first hypothesis: search the web or available tools for how this task type
+   is usually won (model families, known tricks, evaluation pitfalls) and cite the
+   source in the hypothesis rationale — do not rediscover the field from scratch.
 5. hypothesis_register — a falsifiable explanation of what limits performance,
    derived from the diagnosis.
 6. run_start(hypothesis_id=...) — experiments without a registered hypothesis are refused.

@@ -67,9 +67,14 @@ This project uses the mlloop MCP server for all model training work. Rules:
 - Never train without an open run: `run_start` -> train -> write artifacts -> `run_finish`.
 - After every run, `diagnose_run` and study the failure modes before proposing changes.
 - Every experiment must test a registered falsifiable hypothesis (`hypothesis_register`).
-- If runs stagnate or you suspect the data/labels, run `forensics_run` and generate
-  the verdict report instead of blindly trying more models.
+- Before the first hypothesis, look up how this task type is usually won (search the
+  web or available tools for prior recipes) and cite the source in the rationale.
+- If runs stagnate, pivot before giving up: `ensemble_probe` (free), `fe_probe`, a
+  different model family, or `forensics_run` — and use `compare_runs` for paired
+  significance before calling a small delta real or dead.
 - Improvements smaller than the noise floor (from `diagnose_run`) are noise, not progress.
+- Stopping requires evidence: target met, a high-confidence data-limited verdict, or
+  budget exhaustion — recorded with `decision_record`. Running out of ideas is not one.
 ```
 
 ## Overnight autonomous sessions
