@@ -313,6 +313,30 @@ class LedgerService:
             ),
         }
 
+    def target_update(self, *, target_value: float, reason: str) -> dict:
+        """Move the goalpost, on the record. The metric and dataset stay locked —
+        only the stakeholder's ambition changes, and the ledger records why."""
+        if not (reason or "").strip():
+            raise GateError(
+                "reason is required — moving the target is a stakeholder decision "
+                "the ledger records."
+            )
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+            previous = goal["target_value"]
+            con.execute("UPDATE goal SET target_value = ? WHERE id = 1", (float(target_value),))
+            self.ledger.emit(
+                con,
+                "target_updated",
+                {"previous": previous, "target_value": float(target_value), "reason": reason.strip()},
+            )
+        return {
+            "ok": True,
+            "previous": previous,
+            "target_value": float(target_value),
+            "note": "Metric and dataset remain locked; stop_conditions now track the new target.",
+        }
+
     def metric_register(self, *, script_path: str) -> dict:
         """Attach (or replace) the custom metric script that teaches MLLoop how to
         COMPUTE the locked primary metric — the metric name itself never changes."""

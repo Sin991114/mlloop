@@ -152,6 +152,16 @@ def create_server(workspace: str | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    def target_update(target_value: float, reason: str) -> str:
+        """Move the target value of the locked goal, on the record.
+
+        The primary metric and dataset can never change; the target is the
+        stakeholder's ambition and may be raised or lowered with a recorded reason.
+        stop_conditions immediately track the new target.
+        """
+        return call(service.target_update, target_value=target_value, reason=reason)
+
+    @mcp.tool()
     def metric_register(script_path: str) -> str:
         """Attach a custom metric script to the locked goal (the metric NAME never changes;
         this only teaches MLLoop how to COMPUTE it).

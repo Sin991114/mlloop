@@ -507,6 +507,9 @@ const EVENT_STYLE = {
   forensics_completed:   { glyph: "⚗", tell: e => `forensics <b>${esc(e.id)}</b> — verdict <b>${esc(e.verdict)}</b>: <i>${esc(e.headline)}</i>` },
   fe_probe_completed:    { glyph: "⚙", tell: e => `FE probe <b>${esc(e.id)}</b> — ${esc(e.conclusion)}` },
   context_registered:    { glyph: "✎", tell: e => `semantics: <b>${esc(e.feature)}</b> — ${esc(e.meaning)}` },
+  target_updated:        { glyph: "⚑", tell: e => `target moved ${fmt(e.previous)} → <b>${fmt(e.target_value)}</b> — <i>${esc(e.reason)}</i>` },
+  metric_script_registered: { glyph: "𝑓", tell: e => `metric script registered for <b>${esc(e.primary_metric)}</b>` },
+  ensemble_probe_completed: { glyph: "⚙", tell: e => `ensemble probe <b>${esc(e.id)}</b> — ${esc(e.conclusion)}` },
   report_generated:      { glyph: "☰", tell: e => `${esc(e.report_kind ?? "")} report generated` },
   run_finish_rejected:   { glyph: "⛔", tell: e => `<b>${esc(e.run_id)}</b> finish refused — artifact contract not met` },
 };
