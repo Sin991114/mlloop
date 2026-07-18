@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.0.4] - 2026-07-11
+
+Exploration-discipline release, shaped by a competitive study of AIDE (tree
+search, budget always spent), MLE-STAR (retrieved precedent + targeted
+refinement + ensembling), and AutoGluon (ensembles as the default win).
+
+### Added
+- `ensemble_probe`: price ensembling with zero training — average finished runs'
+  stored held-out predictions on their common rows (selection-rate-preserving
+  threshold keeps cut-based metrics like AMS honest) and score against the best
+  single run under a paired bootstrap bar. Field-validated on Higgs: correctly
+  ruled three HGB variants too correlated (+0.044 under a 0.056 bar) and pointed
+  at diversifying model families.
+- `compare_runs` + paired significance inside `run_finish`: when two runs share
+  held-out rows, a paired bootstrap on identical resamples cancels shared
+  variance — on Higgs the believable-delta bar sharpened from the ±0.19 AMS
+  single-run floor to ±0.09–0.11.
+- Stopping now requires evidence: `status` reports `stop_conditions`
+  (target met / high-confidence data-limited verdict / budget exhausted) and an
+  `exploration_hint` while none holds; stagnation suggests concrete pivots
+  (ensemble_probe, fe_probe, a different model family, forensics). "I ran out
+  of ideas" is not a stop condition.
+- Wall-clock training budget: `policy.max_train_hours` caps cumulative
+  train_seconds; sweep runs legitimized (a run may internally be an Optuna-style
+  HPO search over one family, with `n_trials` in meta.json).
+- Recipe-retrieval step in the agent guidance: look up how the task type is
+  usually won before the first hypothesis, and cite the source.
+
 ## [0.0.3] - 2026-07-11
 
 ### Added

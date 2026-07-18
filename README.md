@@ -34,6 +34,14 @@ that loop at the tool layer, not via prompts:
   on it: screens arithmetic combinations and stacked-model features for incremental
   signal with a paired, multiple-testing-adjusted significance bar. The probe generates
   hypotheses; the ledger tests them.
+- **Ensemble probe & paired comparisons** — `ensemble_probe` prices combining finished
+  runs with zero training (from their stored predictions); `compare_runs` and
+  `run_finish` resolve small-but-real deltas with paired bootstrap significance on
+  shared rows, far sharper than the single-run noise floor.
+- **Exploration discipline** — stopping requires evidence (target met, high-confidence
+  data-limited verdict, or budget exhaustion); until then `status` keeps the pressure on
+  and stagnation suggests concrete pivots. Budgets cover both run count and wall-clock
+  training time, and HPO sweeps are first-class runs.
 - **Custom metrics** — a domain metric (AMS, weighted cost, ...) plugs in as a python
   file defining `metric(predictions) -> float` (`goal_define(metric_script=...)` or
   `metric_register`); the noise floor is then computed in the metric's real units.
