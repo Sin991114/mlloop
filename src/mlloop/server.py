@@ -221,7 +221,10 @@ def create_server(workspace: str | None = None) -> FastMCP:
         kind: 'baseline' (first run, no hypothesis), 'experiment' (requires
         hypothesis_id of an open hypothesis), or 'forensics'. intent: one sentence on
         what this run changes and why. parent_run_id defaults to the last finished run.
-        Only one run may be open at a time.
+        Only one run may be open at a time. A run may internally be an HPO sweep
+        (e.g. Optuna over one model family): the hypothesis is then about the family
+        ("tuning X beats its default beyond the paired bar"), ship the best config's
+        artifacts, and set n_trials in meta.json.
         """
         return call(
             service.run_start,

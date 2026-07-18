@@ -72,3 +72,30 @@ def test_stagnation_suggests_pivots(svc_ready, make_artifacts):
     pivots = svc.status()["stagnation"]["suggested_pivots"]
     assert any("ensemble_probe" in p for p in pivots)
     assert any("model family" in p for p in pivots)
+
+
+def test_train_time_budget_gate(svc, dataset, make_artifacts):
+    import pytest
+
+    from mlloop.service import GateError
+
+    svc.goal_define(
+        task_type="classification", dataset_path=str(dataset), target_column="label",
+        primary_metric="auc", metric_direction="maximize",
+        policy={"max_train_hours": 0.0001},  # ~0.36s; conftest meta reports 1.2s
+    )
+    run = svc.run_start(intent="baseline", kind="baseline")
+    make_artifacts(run["artifact_dir"])
+    svc.run_finish(run_id=run["run_id"], metrics={"auc": 0.6})
+    svc.diagnose_run(run_id=run["run_id"])
+
+    status = svc.status()
+    assert status["budget"]["train_hours_used"] > 0
+    assert status["budget"]["max_train_hours"] == 0.0001
+    assert status["stop_conditions"]["budget_exhausted"] is True
+
+    hypothesis_id = svc.hypothesis_register(
+        statement="s", rationale="r", prediction="p", test_plan="t"
+    )["hypothesis"]["id"]
+    with pytest.raises(GateError, match="Training-time budget"):
+        svc.run_start(intent="one more", hypothesis_id=hypothesis_id)

@@ -32,7 +32,8 @@ ARTIFACT_CONTRACT = {
     ),
     "meta.json": (
         "required — keys: model_desc (str), hyperparams (dict), features (list), "
-        "seed (int); recommended: train_seconds, feature_importance (dict)"
+        "seed (int); recommended: train_seconds, feature_importance (dict), and "
+        "n_trials (int) when the run is an internal HPO sweep"
     ),
     "train.*": (
         "required — self-contained, seeded training script that reproduces this run's "
@@ -96,6 +97,15 @@ class LedgerService:
             "SELECT 1 FROM runs WHERE kind = 'baseline' AND status = 'finished' LIMIT 1"
         ).fetchone()
         return row is not None
+
+    def _train_seconds_used(self, con: sqlite3.Connection) -> float:
+        total = 0.0
+        for row in con.execute("SELECT meta FROM runs WHERE meta IS NOT NULL").fetchall():
+            try:
+                total += float(json.loads(row["meta"]).get("train_seconds") or 0.0)
+            except (ValueError, TypeError):
+                continue
+        return total
 
     def _diagnosed(self, con: sqlite3.Connection, run_id: str) -> bool:
         return con.execute("SELECT 1 FROM diagnoses WHERE run_id = ?", (run_id,)).fetchone() is not None
@@ -497,6 +507,15 @@ class LedgerService:
                     "decision_record summarizing where things stand; the user can raise the "
                     "budget in a new goal if warranted."
                 )
+            max_train_hours = policy.get("max_train_hours")
+            if max_train_hours is not None:
+                used_hours = self._train_seconds_used(con) / 3600
+                if used_hours >= float(max_train_hours):
+                    raise GateError(
+                        f"Training-time budget exhausted ({used_hours:.2f}h of "
+                        f"{max_train_hours}h). Record a decision_record summarizing where "
+                        "things stand."
+                    )
 
             baseline_done = self._baseline_done(con)
             if not baseline_done and kind != "baseline":
@@ -1298,7 +1317,12 @@ class LedgerService:
                 and verdict_row.get("verdict") in ("data_limited", "no_signal")
                 and verdict_row.get("confidence") == "high"
             )
-            budget_exhausted = started >= max_runs
+            max_train_hours = policy.get("max_train_hours")
+            train_hours_raw = self._train_seconds_used(con) / 3600
+            train_hours_used = round(train_hours_raw, 4)
+            budget_exhausted = started >= max_runs or (
+                max_train_hours is not None and train_hours_raw >= float(max_train_hours)
+            )
             stop_conditions = {
                 "target_met": target_met,
                 "data_limited_verdict": data_limited,
@@ -1334,6 +1358,8 @@ class LedgerService:
                     "max_runs": max_runs,
                     "runs_started": started,
                     "runs_remaining": max(0, max_runs - started),
+                    "train_hours_used": train_hours_used,
+                    **({"max_train_hours": max_train_hours} if max_train_hours is not None else {}),
                 },
                 "best_run": {"id": best[0], goal["primary_metric"]: best[1]} if best else None,
                 "hypotheses": hypothesis_counts,
