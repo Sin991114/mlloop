@@ -309,6 +309,14 @@ function renderMasthead() {
     attn = `<strong>Diagnosis pending.</strong> ${esc(s.hint || "The last finished run has not been diagnosed yet.")}`;
   else if (s.stagnation?.forensics_recommended)
     attn = `<strong>${s.stagnation.consecutive_non_improving_runs} runs without improvement</strong> — the ledger recommends interrogating the data: <span class="mono">forensics_run</span>.`;
+  else if (s.stop_conditions?.stopping_justified) {
+    const why = s.stop_conditions.target_met ? "target met"
+      : s.stop_conditions.data_limited_verdict ? "high-confidence data-limited verdict"
+      : "budget exhausted";
+    attn = `<strong>Stopping is justified</strong> — ${esc(why)}. Record the close-out with <span class="mono">decision_record</span>.`;
+  }
+  else if (s.exploration_hint)
+    attn = `<strong>The ledger expects more.</strong> ${esc(s.exploration_hint)}`;
   $("attention").innerHTML = attn ? `<div class="attention reveal r1">${attn}</div>` : "";
 }
 

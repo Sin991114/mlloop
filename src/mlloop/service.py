@@ -1284,6 +1284,48 @@ class LedgerService:
                 "SELECT id, verdict FROM forensics ORDER BY rowid DESC LIMIT 1"
             ).fetchone()
 
+            # Stopping is a decision that requires evidence (P2): one of these
+            # must hold, otherwise the ledger expects continued exploration.
+            target = goal["target_value"]
+            target_met = bool(
+                best is not None
+                and target is not None
+                and (best[1] >= target if direction == "maximize" else best[1] <= target)
+            )
+            verdict_row = json.loads(latest_forensics["verdict"]) if latest_forensics else None
+            data_limited = bool(
+                verdict_row
+                and verdict_row.get("verdict") in ("data_limited", "no_signal")
+                and verdict_row.get("confidence") == "high"
+            )
+            budget_exhausted = started >= max_runs
+            stop_conditions = {
+                "target_met": target_met,
+                "data_limited_verdict": data_limited,
+                "budget_exhausted": budget_exhausted,
+                "stopping_justified": target_met or data_limited or budget_exhausted,
+            }
+
+            suggested_pivots: list[str] = []
+            if streak >= 2:
+                finished_count = len(finished_rows)
+                if finished_count >= 2 and con.execute(
+                    "SELECT COUNT(*) FROM ensemble_probes"
+                ).fetchone()[0] == 0:
+                    suggested_pivots.append(
+                        "ensemble_probe — price combining the finished runs (zero training)"
+                    )
+                if con.execute("SELECT COUNT(*) FROM fe_probes").fetchone()[0] == 0:
+                    suggested_pivots.append(
+                        "fe_probe — price feature engineering before spending runs on it"
+                    )
+                suggested_pivots.append(
+                    "a genuinely different model family (linear vs boosted trees vs kNN/NN) — "
+                    "correlated variants cannot beat their shared ceiling"
+                )
+                if latest_forensics is None:
+                    suggested_pivots.append("forensics_run — interrogate the data itself")
+
             registered_context = con.execute("SELECT COUNT(*) FROM feature_context").fetchone()[0]
             dataset_columns = len(json.loads(goal["dataset_fingerprint"])["columns"]) - 1
             base = {
@@ -1302,7 +1344,9 @@ class LedgerService:
                 "stagnation": {
                     "consecutive_non_improving_runs": streak,
                     "forensics_recommended": streak >= forensics_after and latest_forensics is None,
+                    **({"suggested_pivots": suggested_pivots} if suggested_pivots else {}),
                 },
+                "stop_conditions": stop_conditions,
                 "latest_forensics": (
                     {
                         "id": latest_forensics["id"],
@@ -1349,12 +1393,15 @@ class LedgerService:
                     ),
                     **base,
                 }
-            return {
+            ready = {
                 "state": "READY",
                 "allowed_actions": [
                     "hypothesis_register",
                     "run_start (kind='experiment', hypothesis_id=...)",
                     "hypothesis_resolve",
+                    "compare_runs",
+                    "ensemble_probe",
+                    "fe_probe",
                     "forensics_run",
                     "report_generate",
                     "decision_record",
@@ -1362,6 +1409,14 @@ class LedgerService:
                 ],
                 **base,
             }
+            if not stop_conditions["stopping_justified"]:
+                ready["exploration_hint"] = (
+                    f"{max(0, max_runs - started)} runs remain and no stop condition holds "
+                    "(target not met, no high-confidence data-limited verdict, budget not "
+                    "exhausted) — the ledger expects the next hypothesis, or a decision_record "
+                    "citing stopping evidence."
+                )
+            return ready
 
     def ledger_query(self, *, view: str = "summary", run_id: str | None = None, limit: int = 20) -> dict:
         with self.ledger.connect() as con:

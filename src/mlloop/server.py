@@ -34,6 +34,12 @@ MLLoop is a scientific-method harness for ML experimentation. Enforced workflow:
 9. When runs stagnate (status reports forensics_recommended) or you suspect the data itself:
    forensics_run interrogates the dataset (label noise, signal check, conflict rate,
    learning curve), then report_generate(kind='verdict') produces the stakeholder report.
+STOPPING REQUIRES EVIDENCE: keep hypothesizing until the target is met, a
+high-confidence data-limited verdict lands, or the budget runs out — then record the
+stop with decision_record citing that evidence. When runs stagnate, PIVOT before
+giving up: ensemble_probe (price combining finished runs — zero training),
+compare_runs (paired significance on shared rows), fe_probe, a genuinely different
+model family, or forensics_run. "I ran out of ideas" is not a stop condition.
 Call status anytime for the current state and allowed actions; ledger_query to recover
 full context after a restart or context compaction.
 """
