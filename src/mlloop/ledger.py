@@ -85,6 +85,12 @@ CREATE TABLE IF NOT EXISTS fe_probes (
     results TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ensemble_probes (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    results TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS diagnoses (
     run_id TEXT PRIMARY KEY REFERENCES runs (id),
     created_at TEXT NOT NULL,

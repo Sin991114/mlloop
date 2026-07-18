@@ -861,6 +861,103 @@ class LedgerService:
             ),
         }
 
+    def _metric_compute(self, goal):
+        """Return (scorer(frame) -> float, scored_metric_name, is_fallback)."""
+        fn = self._metric_fn(goal)
+        if fn is not None:
+            return fn, goal["primary_metric"], False
+        from .diagnostics import positive_proba
+        from .metrics import compute, resolve_metric
+
+        spec, fallback = resolve_metric(goal["primary_metric"], goal["task_type"])
+
+        def scorer(frame):
+            proba = positive_proba(frame) if spec.needs_proba else None
+            value = compute(spec, frame["y_true"].to_numpy(), frame["y_pred"].to_numpy(), proba)
+            if value is None:
+                raise ValueError(f"cannot compute {spec.name} on this frame")
+            return value
+
+        return scorer, spec.name, fallback
+
+    def ensemble_probe(self, *, run_ids: list[str] | None = None) -> dict:
+        import pandas as pd
+
+        from .ensembling import run_ensemble_probe
+
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+            if run_ids:
+                rows = []
+                for run_id in run_ids:
+                    run = self._get_run(con, run_id)
+                    if run is None:
+                        raise GateError(f"Unknown run_id '{run_id}'.")
+                    if run["status"] != "finished":
+                        raise GateError(f"Run {run_id} is {run['status']} — only finished runs ensemble.")
+                    if run["kind"] == "forensics":
+                        raise GateError(
+                            f"Run {run_id} is a forensics probe (different evaluation protocol) "
+                            "and cannot join an ensemble."
+                        )
+                    rows.append(run)
+            else:
+                rows = con.execute(
+                    "SELECT * FROM runs WHERE status = 'finished' "
+                    "AND kind IN ('baseline', 'experiment') ORDER BY rowid"
+                ).fetchall()
+            probe_id = self.ledger.next_id(con, "ensemble_probes", "E")
+
+        members: dict[str, pd.DataFrame] = {}
+        skipped: list[str] = []
+        for row in rows:
+            path = Path(row["artifact_dir"]) / "predictions.parquet"
+            if path.exists():
+                members[row["id"]] = pd.read_parquet(path)
+            else:
+                skipped.append(row["id"])
+        if len(members) < 2:
+            raise GateError(
+                "Pricing an ensemble needs at least two finished runs with stored predictions."
+            )
+        with self.ledger.connect() as con:
+            goal = self._require_goal(con)
+        scorer, metric_name, fallback = self._metric_compute(goal)
+        results = run_ensemble_probe(
+            member_predictions=members,
+            metric_compute=scorer,
+            metric_name=metric_name,
+            direction=goal["metric_direction"],
+            task_type=goal["task_type"],
+        )
+        if skipped:
+            results["skipped_runs"] = skipped
+        if fallback:
+            results["metric_note"] = (
+                f"primary metric '{goal['primary_metric']}' has no registered computation; "
+                f"scored with '{metric_name}' — register a metric script for real units"
+            )
+        if not results.get("ok"):
+            return results
+        with self.ledger.connect() as con:
+            con.execute(
+                "INSERT INTO ensemble_probes (id, created_at, results) VALUES (?, ?, ?)",
+                (probe_id, utcnow(), json.dumps(results, ensure_ascii=False)),
+            )
+            self.ledger.emit(
+                con,
+                "ensemble_probe_completed",
+                {"id": probe_id, "verdict": results["verdict"], "conclusion": results["conclusion"]},
+            )
+        results["probe_id"] = probe_id
+        results["next"] = (
+            "Verdict ensemble_worth_testing: register the ensembling hypothesis and confirm "
+            "with a real run (seed bagging / diverse families / stacking usually beat a plain "
+            "average). Otherwise: add a run from a genuinely different model family first — "
+            "correlated members cannot pay."
+        )
+        return results
+
     # ------------------------------------------------------------------
     # diagnostics & forensics (Phase 1)
     # ------------------------------------------------------------------
@@ -1234,7 +1331,15 @@ class LedgerService:
                         for row in rows
                     ]
                 }
+            if view == "ensemble_probes":
+                rows = con.execute("SELECT * FROM ensemble_probes ORDER BY rowid").fetchall()
+                return {
+                    "ensemble_probes": [
+                        {"id": row["id"], "created_at": row["created_at"], **json.loads(row["results"])}
+                        for row in rows
+                    ]
+                }
             raise GateError(
                 f"Unknown view '{view}'. Views: summary, runs, run, hypotheses, decisions, "
-                "events, diagnosis, forensics, context, fe_probes."
+                "events, diagnosis, forensics, context, fe_probes, ensemble_probes."
             )

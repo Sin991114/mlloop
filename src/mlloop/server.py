@@ -270,6 +270,19 @@ def create_server(workspace: str | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    def ensemble_probe(run_ids: list[str] | None = None) -> str:
+        """Price ensembling with ZERO training: average the stored held-out predictions of
+        finished runs on their shared rows and score against the best single run — paired,
+        on identical rows.
+
+        Defaults to every finished baseline/experiment run; pass run_ids to choose members.
+        Verdict ensemble_worth_testing -> register an ensembling hypothesis and confirm with
+        a real run (seed bagging, diverse families, stacking). ensemble_unlikely_to_help
+        usually means the members are too correlated — diversify model families first.
+        """
+        return call(service.ensemble_probe, run_ids=run_ids)
+
+    @mcp.tool()
     def fe_probe(top_k: int = 5, quick: bool = False) -> str:
         """Price the feature-engineering opportunity BEFORE spending runs on it.
 
